@@ -404,6 +404,91 @@
       (uiop:delete-directory-tree root :validate t :if-does-not-exist ':ignore)))
   nil)
 
+(-> spacemacs-tool-test--preference-context () null)
+(defun spacemacs-tool-test--preference-context ()
+  "Test request-local editor preference only for a visible live bridge."
+  (let* ((configuration (test-configuration))
+         (root (test-configuration-root configuration))
+         (conversation
+          (conversation-create configuration
+                               :identifier
+                               (format nil "spacemacs-context-~A"
+                                       (make-identifier))))
+         (tool-namespaces
+          (vector
+           (json-object
+            "name" "spacemacs"
+            "tools" (vector (json-object "name" "command")))))
+         (request
+          (make-instance 'request-context
+                         :configuration configuration
+                         :conversation conversation
+                         :tool-namespaces tool-namespaces))
+         (hidden-request
+          (make-instance 'request-context
+                         :configuration configuration
+                         :conversation conversation
+                         :tool-namespaces #()))
+         (compaction-request
+          (make-instance 'request-context
+                         :configuration configuration
+                         :conversation conversation
+                         :tool-namespaces tool-namespaces
+                         :compaction-p t)))
+    (unwind-protect
+        (progn
+          (test-assert (spacemacs-tool--visible-p request)
+                       "the exact spacemacs.command namespace is visible")
+          (test-assert (not (spacemacs-tool--visible-p hidden-request))
+                       "a request without spacemacs.command is not guided")
+          (test-assert (null (spacemacs-command-preference-context request))
+                       "no editor preference is emitted without a live bridge")
+          (spacemacs-tool-test--write-record
+           configuration "live.sexp"
+           (list ':autolith-spacemacs
+                 ':version *spacemacs-tool-registry-version*
+                 ':pid (sb-posix:getpid)
+                 ':server-name "context-bridge"
+                 ':created-at (get-universal-time)))
+          (let ((contribution
+                  (spacemacs-command-preference-context request))
+                (registration
+                  (context--registration-find
+                   "spacemacs-command-preference")))
+            (test-assert
+             (and contribution
+                  (string=
+                   (context-contribution-identifier contribution)
+                   "spacemacs-command-preference")
+                  (eq (context-contribution-class contribution) ':mandatory)
+                  (eq (context-contribution-lifetime contribution)
+                      ':while-relevant))
+             "a visible live bridge activates mandatory editor-link preference")
+            (test-assert
+             (and registration
+                  (eq (getf registration :source) ':built-in))
+             "the editor preference contributor has built-in provenance"))
+          (test-assert
+           (null (spacemacs-command-preference-context hidden-request))
+           "an unavailable editor tool never receives preference advice")
+          (test-assert
+           (null (spacemacs-command-preference-context compaction-request))
+           "compaction requests omit editor preference advice")
+          (test-call-with-function-replacements
+           (list
+            (list 'spacemacs-tool--records-for-configuration
+                  (lambda (actual-configuration)
+                    (declare (ignore actual-configuration))
+                    (error "broken Spacemacs registry"))))
+           (lambda ()
+             (test-assert
+              (null (spacemacs-command-preference-context request))
+              "registry failures never break provider context assembly"))))
+      (uiop:delete-directory-tree root
+                                  :validate t
+                                  :if-does-not-exist ':ignore)))
+  nil)
+
 (-> spacemacs-tool-test--server-selection () null)
 (defun spacemacs-tool-test--server-selection ()
   "Test zero, one, multiple, explicit, and invalid server selection."
@@ -637,6 +722,7 @@
   (spacemacs-tool-test--requests)
   (spacemacs-tool-test--path-confinement)
   (spacemacs-tool-test--discovery)
+  (spacemacs-tool-test--preference-context)
   (spacemacs-tool-test--server-selection)
   (spacemacs-tool-test--invoke)
   (spacemacs-tool-test--wire-boundary)

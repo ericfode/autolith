@@ -180,6 +180,114 @@
         (kill-buffer buffer))
       (delete-directory directory t))))
 
+(ert-deftest autolith-test-term-normalizes-horizontal-position-columns ()
+  (should
+   (equal "before\e[0Gmiddle\e[2Gafter"
+          (autolith--term-normalize-output
+           "before\e[1Gmiddle\e[3Gafter")))
+  (should
+   (equal '("complete" . "\e[12")
+          (autolith--term-split-output "complete\e[12")))
+  (let* ((first (autolith--term-split-output "before\e[1"))
+         (completed (concat (cdr first) "Gafter")))
+    (should (equal "before" (car first)))
+    (should (equal "\e[0Gafter"
+                   (autolith--term-normalize-output completed)))))
+
+(ert-deftest autolith-test-term-process-filter-retains-and-flushes-partial-hpa ()
+  (let ((process (start-process "autolith-filter-test" nil "/bin/cat"))
+        forwarded
+        events)
+    (unwind-protect
+        (progn
+          (process-put
+           process 'autolith-previous-filter
+           (lambda (_process output)
+             (setq forwarded (append forwarded (list output)))))
+          (autolith--term-process-filter process "before\e[1")
+          (should (equal '("before") forwarded))
+          (should
+           (equal "\e[1"
+                  (process-get process 'autolith-term-filter-pending)))
+          (autolith--term-process-filter process "3Gafter")
+          (should (equal '("before" "\e[12Gafter") forwarded))
+          (should-not (process-get process 'autolith-term-filter-pending))
+          (process-put process 'autolith-term-filter-pending "\e[9")
+          (process-put
+           process 'autolith-previous-filter
+           (lambda (_process output)
+             (setq events
+                   (append events (list (list 'filter output))))))
+          (process-put
+           process 'autolith-previous-sentinel
+           (lambda (_process event)
+             (setq events
+                   (append events (list (list 'sentinel event))))))
+          (delete-process process)
+          (should-not (process-live-p process))
+          (autolith--attachment-sentinel process "finished\n")
+          (should
+           (equal '((filter "\e[9") (sentinel "finished\n")) events))
+          (should-not (process-get process 'autolith-term-filter-pending)))
+      (when (process-live-p process)
+        (delete-process process)))))
+
+(ert-deftest autolith-test-reload-refreshes-live-chat-terminal ()
+  (let ((library (or (symbol-file 'autolith-start 'defun)
+                     (locate-library "autolith")))
+        (buffer nil))
+    (unwind-protect
+        (progn
+          (setq buffer
+                (autolith--make-term
+                 "*Autolith reload test*" "/bin/cat" nil default-directory))
+          (let* ((process (get-buffer-process buffer))
+                 (previous-filter (process-filter process)))
+            (with-current-buffer buffer
+              (autolith-chat-mode 1))
+            (define-key autolith-chat-mode-map [left] nil)
+            (should-not (lookup-key autolith-chat-mode-map [left]))
+            (should-not (eq #'autolith--term-process-filter
+                            (process-filter process)))
+            (load library nil t)
+            (should (eq #'autolith-term-send-left
+                        (lookup-key autolith-chat-mode-map [left])))
+            (should (eq #'autolith--term-process-filter
+                        (process-filter process)))
+            (should (eq previous-filter
+                        (process-get process 'autolith-previous-filter)))))
+      (when (buffer-live-p buffer)
+        (when-let ((process (get-buffer-process buffer)))
+          (delete-process process))
+        (kill-buffer buffer)))))
+
+(ert-deftest autolith-test-terminal-arrow-bindings-send-csi ()
+  (let ((bindings
+         '(([up] autolith-term-send-up "\e[A")
+           ([down] autolith-term-send-down "\e[B")
+           ([right] autolith-term-send-right "\e[C")
+           ([left] autolith-term-send-left "\e[D")))
+        sent)
+    (dolist (binding bindings)
+      (should (eq (nth 1 binding)
+                  (lookup-key autolith-chat-mode-map (car binding)))))
+    (with-temp-buffer
+      (use-local-map term-raw-map)
+      (cl-letf (((symbol-function 'term-send-raw-string)
+                 (lambda (sequence) (push sequence sent))))
+        (dolist (binding bindings)
+          (call-interactively (nth 1 binding)))))
+    (should (equal (mapcar #'caddr bindings) (nreverse sent))))
+  (with-temp-buffer
+    (insert "first\nsecond")
+    (goto-char (point-max))
+    (use-local-map term-mode-map)
+    (cl-letf (((symbol-function 'term-send-raw-string)
+               (lambda (_sequence)
+                 (ert-fail "History navigation sent raw terminal input"))))
+      (autolith-term-send-up))
+    (should (= 1 (line-number-at-pos)))))
+
 (ert-deftest autolith-test-start-launches-top-level-and-discovers-session ()
   (let* ((directory (make-temp-file "autolith-start-directory-" t))
          (session-id "Ab3dE9x")
@@ -286,9 +394,13 @@
                 (autolith--make-term
                  "*Autolith term initialization test*"
                  "/bin/cat" nil default-directory))
-          (autolith--install-chat-process
-           buffer (get-buffer-process buffer) 'take-over)
-          (should (= 1 term-mode-count)))
+          (let ((process (get-buffer-process buffer)))
+            (autolith--install-chat-process buffer process 'take-over)
+            (should (= 1 term-mode-count))
+            (should (eq #'autolith--term-process-filter
+                        (process-filter process)))
+            (should (functionp
+                     (process-get process 'autolith-previous-filter)))))
       (when (buffer-live-p buffer)
         (when-let ((process (get-buffer-process buffer)))
           (delete-process process))

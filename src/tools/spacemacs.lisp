@@ -26,6 +26,10 @@
 
 This stays below Linux's 128 KiB per-argument exec limit.")
 
+(defparameter *spacemacs-command-preference-instruction*
+  "An opted-in live Spacemacs editor bridge is available. When the user explicitly refers to an Emacs or Spacemacs buffer, window, point, region, or editor action, use spacemacs.command before shell.run, emacsclient, or filesystem/process workarounds. Use another mechanism only when the requested operation is outside spacemacs.command's closed operation set or that tool returns a concrete failure."
+  "Request-local guidance activated while a live Spacemacs bridge is available.")
+
 (defparameter *spacemacs-tool-operations*
   '("status" "visit-file" "focus-buffer" "goto-line" "insert-text"
     "replace-region" "save-buffer" "message")
@@ -81,12 +85,17 @@ This stays below Linux's 128 KiB per-argument exec limit.")
 
 ;;;; -- Bridge Discovery --
 
+(-> spacemacs-tool--registry-directory-for-configuration
+    (configuration) pathname)
+(defun spacemacs-tool--registry-directory-for-configuration (configuration)
+  "Return CONFIGURATION's private live Spacemacs bridge directory."
+  (merge-pathnames "spacemacs/" (configuration-state-root configuration)))
+
 (-> spacemacs-tool--registry-directory (tool-context) pathname)
 (defun spacemacs-tool--registry-directory (context)
   "Return CONTEXT's private live Spacemacs bridge directory."
-  (merge-pathnames
-   "spacemacs/"
-   (configuration-state-root (tool-context-configuration context))))
+  (spacemacs-tool--registry-directory-for-configuration
+   (tool-context-configuration context)))
 
 (-> spacemacs-tool--proper-list-p (t) boolean)
 (defun spacemacs-tool--proper-list-p (value)
@@ -153,14 +162,16 @@ This stays below Linux's 128 KiB per-argument exec limit.")
        (not (= (sb-posix:syscall-errno condition) sb-posix:esrch)))
      (error () nil))))
 
-(-> spacemacs-tool--records (tool-context) list)
-(defun spacemacs-tool--records (context)
-  "Return distinct live bridge records newest first for CONTEXT."
+(-> spacemacs-tool--records-for-configuration (configuration) list)
+(defun spacemacs-tool--records-for-configuration (configuration)
+  "Return CONFIGURATION's distinct live bridge records newest first."
   (let ((records
           (sort
            (loop for pathname in
                  (uiop:directory-files
-                  (spacemacs-tool--registry-directory context) "*.sexp")
+                  (spacemacs-tool--registry-directory-for-configuration
+                   configuration)
+                  "*.sexp")
                  for record = (spacemacs-tool--read-record pathname)
                  when (and record
                            (spacemacs-tool--pid-live-p
@@ -175,6 +186,58 @@ This stays below Linux's 128 KiB per-argument exec limit.")
             collect (progn
                       (setf (gethash server seen) t)
                       record))))
+
+(-> spacemacs-tool--records (tool-context) list)
+(defun spacemacs-tool--records (context)
+  "Return distinct live bridge records newest first for CONTEXT."
+  (spacemacs-tool--records-for-configuration
+   (tool-context-configuration context)))
+
+(-> spacemacs-tool--visible-p (request-context) boolean)
+(defun spacemacs-tool--visible-p (request)
+  "Return true when REQUEST exposes the exact spacemacs.command tool."
+  (not
+   (null
+    (loop for namespace across (request-context-tool-namespaces request)
+          for namespace-name =
+            (and (json-object-p namespace) (json-get namespace "name"))
+          for tools =
+            (and (json-object-p namespace) (json-get namespace "tools"))
+          thereis
+          (and (stringp namespace-name)
+               (string= namespace-name "spacemacs")
+               (vectorp tools)
+               (loop for tool across tools
+                     for tool-name =
+                       (and (json-object-p tool) (json-get tool "name"))
+                     thereis
+                     (and (stringp tool-name)
+                          (string= tool-name "command"))))))))
+
+(-> spacemacs-command-preference-context
+    (request-context)
+    (option context-contribution))
+(defun spacemacs-command-preference-context (request)
+  "Prefer the live editor link for explicit Spacemacs buffer operations."
+  (let ((records
+          (and (not (request-context-compaction-p request))
+               (spacemacs-tool--visible-p request)
+               (ignore-errors
+                 (spacemacs-tool--records-for-configuration
+                  (request-context-configuration request))))))
+    (when records
+      (make-context-contribution
+       :identifier "spacemacs-command-preference"
+       :instruction *spacemacs-command-preference-instruction*
+       :priority 60
+       :lifetime ':while-relevant
+       :class ':mandatory
+       :deduplication-key "spacemacs-command-preference"))))
+
+(register-context-contributor
+ "spacemacs-command-preference"
+ 'spacemacs-command-preference-context
+ :source ':built-in)
 
 
 (-> spacemacs-tool--server (tool-context json-object) string)

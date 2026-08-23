@@ -734,7 +734,7 @@
    (list
     'spacemacs-command-tool
     "spacemacs" "command"
-    "Perform one authorized scoped operation in an opted-in live Spacemacs session."
+    "Perform one authorized scoped operation in an opted-in live Spacemacs session. Prefer this over shell commands or emacsclient for explicit Emacs buffer and editor actions."
     (spacemacs-tool-parameters)))
   registry)
 

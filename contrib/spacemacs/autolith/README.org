@@ -60,6 +60,9 @@ Spacemacs process still has a stale preflight layer index; use
 ~SPC u SPC u SPC f e R~ to skip that preflight and reload while refreshing the
 index.
 
+The same reload command applies later layer updates to existing Autolith terminal
+buffers.
+
 * Use
 
 Use ~SPC a A n~ to start a new interactive Autolith inferer. It starts in the
@@ -150,6 +153,10 @@ external-tool authorization and invokes only
 =(autolith-editor-dispatch-json "BASE64_JSON")= through direct =emacsclient=
 arguments. The protocol does not accept arbitrary Lisp forms, command symbols,
 shell interpolation, or =call-interactively=.
+
+While a live bridge and the tool are available, Autolith gives explicit editor
+and buffer requests a request-local preference for =spacemacs.command= instead
+of shell commands or direct =emacsclient= workarounds.
 
 | Operation        | Effect                                                        |
 |------------------+---------------------------------------------------------------|

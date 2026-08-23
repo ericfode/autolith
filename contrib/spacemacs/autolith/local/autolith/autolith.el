@@ -128,15 +128,109 @@ When nil, use the spacemacs directory below Autolith's XDG state root."
 (defvar-local autolith--session-discovery-timer nil
   "Pending one-shot timer discovering a launched Autolith session.")
 
-(defvar autolith-chat-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-d") #'autolith-detach)
-    (define-key map (kbd "C-c C-s") #'autolith-send-prompt)
-    (define-key map (kbd "C-c C-l") #'autolith-list-sessions)
-    (define-key map (kbd "C-c C-h") #'autolith-show-history)
-    (define-key map (kbd "C-c C-e") #'autolith-jump-to-live)
-    map)
+(defconst autolith--term-hpa-regexp "\e\\[\\([0-9]+\\)G"
+  "Standard one-based horizontal-position sequences emitted by Autolith.")
+
+(defconst autolith--term-hpa-prefix-regexp "\e\\(?:\\[[0-9]*\\)?\\'"
+  "Incomplete horizontal-position sequence suffix retained across output chunks.")
+
+(defun autolith--term-character-mode-p ()
+  "Return non-nil when the current terminal accepts raw character input."
+  (eq (current-local-map) term-raw-map))
+
+(defun autolith--term-send-arrow (sequence fallback)
+  "Send cursor-key SEQUENCE in character mode, otherwise invoke FALLBACK."
+  (if (autolith--term-character-mode-p)
+      (term-send-raw-string sequence)
+    (call-interactively fallback)))
+
+(defun autolith-term-send-up ()
+  "Send the CSI up-arrow sequence, or move up while browsing history."
+  (interactive)
+  (autolith--term-send-arrow "\e[A" #'previous-line))
+
+(defun autolith-term-send-down ()
+  "Send the CSI down-arrow sequence, or move down while browsing history."
+  (interactive)
+  (autolith--term-send-arrow "\e[B" #'next-line))
+
+(defun autolith-term-send-right ()
+  "Send the CSI right-arrow sequence, or move right while browsing history."
+  (interactive)
+  (autolith--term-send-arrow "\e[C" #'forward-char))
+
+(defun autolith-term-send-left ()
+  "Send the CSI left-arrow sequence, or move left while browsing history."
+  (interactive)
+  (autolith--term-send-arrow "\e[D" #'backward-char))
+
+(defun autolith--term-normalize-output (output)
+  "Normalize standard horizontal cursor positions in OUTPUT for `term'.
+
+Emacs `term' interprets CSI column G as zero-based even though terminals emit
+one-based columns.  Decrement each explicit column so cursor placement does not
+insert a padding space before the visible cursor."
+  (replace-regexp-in-string
+   autolith--term-hpa-regexp
+   (lambda (sequence)
+     (format "\e[%dG"
+             (max 0
+                  (1- (string-to-number (substring sequence 2 -1))))))
+   output t t))
+
+(defun autolith--term-split-output (output)
+  "Return normalized-ready OUTPUT and any incomplete HPA suffix as a cons."
+  (let ((case-fold-search nil))
+    (if (string-match autolith--term-hpa-prefix-regexp output)
+        (cons (substring output 0 (match-beginning 0))
+              (substring output (match-beginning 0)))
+      (cons output nil))))
+
+(defun autolith--term-process-filter (process output)
+  "Normalize terminal OUTPUT before forwarding it to PROCESS's original filter."
+  (let* ((combined
+          (concat (or (process-get process 'autolith-term-filter-pending) "")
+                  output))
+         (parts (autolith--term-split-output combined))
+         (complete (car parts))
+         (pending (cdr parts))
+         (previous (process-get process 'autolith-previous-filter)))
+    (process-put process 'autolith-term-filter-pending pending)
+    (when (and previous (not (string-empty-p complete)))
+      (funcall previous process (autolith--term-normalize-output complete)))))
+
+(defun autolith--flush-term-filter-pending (process)
+  "Forward PROCESS's incomplete terminal suffix before its sentinel runs."
+  (let ((pending (process-get process 'autolith-term-filter-pending))
+        (previous (process-get process 'autolith-previous-filter)))
+    (process-put process 'autolith-term-filter-pending nil)
+    (when (and previous pending (not (string-empty-p pending)))
+      (funcall previous process pending))))
+
+(defun autolith--install-term-process-filter (process)
+  "Install the HPA-normalizing wrapper on PROCESS when it has a filter."
+  (let ((previous-filter (process-filter process)))
+    (when (and previous-filter
+               (not (eq previous-filter #'autolith--term-process-filter)))
+      (process-put process 'autolith-previous-filter previous-filter)
+      (set-process-filter process #'autolith--term-process-filter))))
+
+(defvar autolith-chat-mode-map (make-sparse-keymap)
   "Keymap active in attached Autolith terminal buffers.")
+
+(defun autolith--define-chat-key-bindings ()
+  "Install Autolith chat bindings in the shared minor-mode keymap."
+  (define-key autolith-chat-mode-map (kbd "C-c C-d") #'autolith-detach)
+  (define-key autolith-chat-mode-map (kbd "C-c C-s") #'autolith-send-prompt)
+  (define-key autolith-chat-mode-map (kbd "C-c C-l") #'autolith-list-sessions)
+  (define-key autolith-chat-mode-map (kbd "C-c C-h") #'autolith-show-history)
+  (define-key autolith-chat-mode-map (kbd "C-c C-e") #'autolith-jump-to-live)
+  (define-key autolith-chat-mode-map [up] #'autolith-term-send-up)
+  (define-key autolith-chat-mode-map [down] #'autolith-term-send-down)
+  (define-key autolith-chat-mode-map [right] #'autolith-term-send-right)
+  (define-key autolith-chat-mode-map [left] #'autolith-term-send-left))
+
+(autolith--define-chat-key-bindings)
 
 (define-minor-mode autolith-chat-mode
   "Mark a terminal buffer as an attached Autolith conversation."
@@ -403,6 +497,7 @@ Return a validated plist without invoking the Emacs Lisp reader."
                 header-line-format (autolith--chat-header nil mode))
     (autolith-chat-mode 1)
     (add-hook 'kill-buffer-hook #'autolith--remove-chat-buffer nil t))
+  (autolith--install-term-process-filter process)
   (process-put process 'autolith-previous-sentinel
                (process-sentinel process))
   (set-process-sentinel process #'autolith--attachment-sentinel)
@@ -482,10 +577,13 @@ Return a validated plist without invoking the Emacs Lisp reader."
   "Run the terminal sentinel and clean up PROCESS after EVENT."
   (let ((buffer (process-buffer process))
         (session-id (process-get process 'autolith-session-id))
-        (previous (process-get process 'autolith-previous-sentinel)))
+        (previous (process-get process 'autolith-previous-sentinel))
+        (live-p (process-live-p process)))
+    (unless live-p
+      (autolith--flush-term-filter-pending process))
     (when previous
       (funcall previous process event))
-    (unless (process-live-p process)
+    (unless live-p
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (autolith--cancel-session-discovery)))
@@ -493,6 +591,18 @@ Return a validated plist without invoking the Emacs Lisp reader."
         (remhash session-id autolith--chat-buffers))
       (when (eq autolith-last-chat-buffer buffer)
         (setq autolith-last-chat-buffer nil)))))
+
+(defun autolith--refresh-live-chat-process-filters ()
+  "Install current terminal filters in already attached Autolith buffers."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (bound-and-true-p autolith-chat-mode)
+          (when-let ((process (get-buffer-process buffer)))
+            (when (process-live-p process)
+              (autolith--install-term-process-filter process))))))))
+
+(autolith--refresh-live-chat-process-filters)
 
 (defun autolith--attach-arguments (session-id mode)
   "Return Autolith attachment arguments for SESSION-ID and MODE."

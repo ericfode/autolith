@@ -8,6 +8,9 @@
 
 (defun autolith/init-autolith ()
   "Initialize the local Autolith Emacs package."
+  (when (featurep 'autolith)
+    (let ((load-prefer-newer t))
+      (load "autolith" nil t)))
   (use-package autolith
     :demand t
     :commands (autolith-start
