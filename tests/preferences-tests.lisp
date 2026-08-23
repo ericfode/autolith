@@ -143,6 +143,32 @@
               (test-assert
                (not (preference-state-codex-fast-mode-p version-two))
                "version two preferences without Fast mode default it to disabled"))
+           (snapshot-write
+            pathname
+            '(:preferences
+               :version 4
+               :model nil
+               :reasoning-effort nil
+               :codex-fast-mode-p t
+               :reasoning-traces-p t
+               :compact-view-p t
+               :turn-timestamps-p nil
+               :simple-technical-english-p nil
+               :permission-mode nil))
+            (let ((preferences (preferences-load configuration)))
+              (test-assert
+               (preference-state-codex-fast-mode-p preferences)
+               "version four preferences preserve Codex Fast mode")
+              (test-assert
+               (preference-state-reasoning-traces-p preferences)
+               "version four preferences preserve reasoning summaries")
+              (multiple-value-bind (form sole-form-p)
+                  (snapshot-read pathname)
+                (test-assert sole-form-p
+                             "version four preferences remain one form")
+                (test-assert
+                 (= (getf (rest form) :version) 4)
+                 "version four preferences remain available to current writers")))
            (with-open-file (stream pathname
                                    :direction ':output
                                    :if-exists ':supersede

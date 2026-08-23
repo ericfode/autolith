@@ -73,7 +73,7 @@
                   (case version
                     (1
                      t)
-                    ((2 3)
+                    ((2 3 4)
                      (let ((model (getf properties :model))
                            (effort (getf properties :reasoning-effort))
                            (compact-present-p
