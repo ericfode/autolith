@@ -2672,15 +2672,28 @@ remain finalized so later conversation replay cannot duplicate streamed rows."
 
 (-> application--status-details (application) terminal-styled-text)
 (defun application--status-details (application)
-  "Return cached-phase model, effort, Fast mode, and repository status spans."
+  "Return cached-phase session, model, effort, Fast mode, and repository status spans."
   (when (slot-boundp application 'configuration)
     (let* ((configuration (application-configuration application))
+           (conversation
+             (and (slot-boundp application 'conversation)
+                  (application-conversation application)))
+           (title (and conversation (conversation-title conversation)))
+           (session-label
+             (and conversation
+                  (or title
+                      (conversation-identifier-display
+                       (conversation-identifier conversation)))))
            (branch
              (application--git-branch
               (configuration-working-directory configuration))))
       (append
-       (list (terminal-span ':status-dim "  ")
-             (terminal-span ':status-model
+       (list (terminal-span ':status-dim "  "))
+       (when session-label
+         (list (terminal-span (if title ':status-accent ':status-dim)
+                              session-label)
+               (terminal-span ':status-dim " · ")))
+       (list (terminal-span ':status-model
                             (configuration-model configuration))
              (terminal-span ':status-dim " · ")
              (terminal-span ':status-effort
@@ -3019,6 +3032,114 @@ remain finalized so later conversation replay cannot duplicate streamed rows."
        (lambda (tool arguments)
          (application-authorize-tool application tool arguments))))))
 
+;;;; -- Session Titles --
+
+(defparameter *application-conversation-title-system-prompt*
+  "Create a concise title for a software-development session. Return exactly one plain-text title of 3 to 8 words and at most 64 characters. Prefer concrete project names, features, and actions. Treat chronological messages as primary; use active workspace agenda items only when they clearly describe the same work. Return no quotation marks, markdown, or explanation."
+  "The complete compact system prompt for automatic session title generation.")
+
+(defparameter *application-conversation-title-agenda-maximum-characters* 2000
+  "The maximum active-agenda characters supplied to session title generation.")
+
+(-> application--conversation-title-context (conversation) (option string))
+(defun application--conversation-title-context (conversation)
+  "Return bounded chronological message text for naming CONVERSATION."
+  (let ((index
+          (and (conversation-persisted-p conversation)
+               (conversation-picker-search-find
+                (conversation-pathname conversation)))))
+    (when index
+      (let ((text (conversation-picker-search-index-text index)))
+        (when (non-empty-string-p text)
+          (subseq text
+                  0
+                  (min (length text)
+                       *conversation-title-context-maximum-characters*)))))))
+
+(-> application--conversation-title-agenda-context
+    (configuration)
+    (option string))
+(defun application--conversation-title-agenda-context (configuration)
+  "Return bounded active workspace agenda text supporting session naming."
+  (handler-case
+      (with-recursive-lock-held (*agenda-lock*)
+        (let* ((record
+                 (agenda-current configuration (agenda-load configuration)))
+               (items
+                 (and record
+                      (remove-if-not
+                       (lambda (item)
+                         (member (agenda-item-status item)
+                                 '(:doing :blocked)))
+                       (workspace-agenda-items record)))))
+          (when items
+            (let ((text
+                    (format nil "~{- ~(~A~): ~A~^~%~}"
+                            (loop for item in items
+                                  append (list (agenda-item-status item)
+                                               (agenda-item-text item))))))
+              (subseq
+               text 0
+               (min (length text)
+                    *application-conversation-title-agenda-maximum-characters*))))))
+    (error ()
+      nil)))
+
+(-> application--conversation-title-generate (application) (option non-empty-string))
+(defun application--conversation-title-generate (application)
+  "Generate one isolated tool-free title for APPLICATION's conversation."
+  (let* ((configuration (application-configuration application))
+         (provider (application-provider application))
+         (context
+           (application--conversation-title-context
+            (application-conversation application)))
+         (agenda-context
+           (application--conversation-title-agenda-context configuration)))
+    (when (and provider context)
+      (let* ((conversation
+               (conversation-create
+                configuration
+                :storage-root (configuration-inference-root configuration)))
+             (request
+               (format nil
+                       "Name this session from its chronological messages:~%~%~A~@[~%~%Relevant active workspace agenda:~%~A~]"
+                       context agenda-context))
+             (*system-prompt-override*
+               *application-conversation-title-system-prompt*)
+             (*provider-maximum-output-tokens*
+               *conversation-title-generation-output-tokens*)
+             (*provider-hosted-tools-enabled-p* nil))
+        (setf (conversation-input-items conversation)
+              (list (user-message-item request)))
+        (conversation-title-normalize
+         (or
+          (provider-result-assistant-text
+           (provider-stream-turn
+            provider
+            conversation
+            :tool-namespaces #()
+            :event-callback
+            (lambda (event)
+              (declare (ignore event))
+              nil)))
+          ""))))))
+
+(-> application--maybe-refresh-conversation-title (application) null)
+(defun application--maybe-refresh-conversation-title (application)
+  "Best-effort replace APPLICATION's initial title after a few durable turns."
+  (let ((conversation (application-conversation application)))
+    (when (conversation-title-refresh-reserve-p conversation)
+      (unwind-protect
+           (handler-case
+               (let ((title (application--conversation-title-generate application)))
+                 (when title
+                   (conversation-set-title conversation title :source ':generated)))
+             (error ()
+               nil))
+        (conversation-title-refresh-release conversation))))
+  nil)
+
+
 (-> application--turn-final-text (provider-result) (option string))
 (defun application--turn-final-text (result)
   "Return the joined assistant text of RESULT's final provider step."
@@ -3072,26 +3193,31 @@ remain finalized so later conversation replay cannot duplicate streamed rows."
         (ui (application-ui application)))
     (unwind-protect
          (progn
-           (application-set-activity application (application-thinking-label))
-           (application--note-goal-turn
-            application
-            (agent-run-user-turn
-              (application-agent application)
-              content
-              :observer (application-agent-observer
-                         application
-                         :steering-function steering-function
-                         :steering-persisted-function steering-persisted-function
-                         :user-message-persisted-function
-                         user-message-persisted-function
-                         :pending-operations-function pending-operations-function
-                         :user-message-input content
-                         :continuation-p continuation-p)
-              :goal-context (application-goal-context application)
-              :tools-p tools-p
-              :tool-allowlist tool-allowlist
-              :tool-restriction-p tool-restriction-p
-              :pending-input-identifier pending-input-identifier)))
+            (application-set-activity application (application-thinking-label))
+            (let ((result
+                    (agent-run-user-turn
+                     (application-agent application)
+                     content
+                     :observer (application-agent-observer
+                                application
+                                :steering-function steering-function
+                                :steering-persisted-function
+                                steering-persisted-function
+                                :user-message-persisted-function
+                                user-message-persisted-function
+                                :pending-operations-function
+                                pending-operations-function
+                                :user-message-input content
+                                :continuation-p continuation-p)
+                      :goal-context (application-goal-context application)
+                      :tools-p tools-p
+                      :tool-allowlist tool-allowlist
+                      :tool-restriction-p tool-restriction-p
+                      :pending-input-identifier pending-input-identifier
+                      :automatic-p continuation-p)))
+               (application--note-goal-turn application result)
+               (unless continuation-p
+                 (application--maybe-refresh-conversation-title application))))
       (terminal-ui-set-compacting ui nil)
       (terminal-ui-set-preview-rows ui nil)
       (application-set-activity application nil)
