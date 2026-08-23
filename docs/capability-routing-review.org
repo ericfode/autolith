@@ -72,16 +72,20 @@ without creating one.
 
 * Managed browser network trust boundary
 
-Autolith retains literal-address, hostname, local-DNS, redirect, and
-subresource checks through CDP Fetch interception. These checks are defense in
-depth, not an end-to-end SSRF boundary. The remote Browser Use environment can
-resolve a hostname differently from the local Autolith host, while the
-inspected managed gateway contract exposes no destination-pinning or
-network-policy endpoint. Same-network enforcement is therefore a Browser
-Use/Nous gateway trust requirement. Autolith cannot claim an SSRF boundary
-across differing local and remote DNS views.
+Autolith intercepts every CDP request URL pattern. HTTP(S) and WS(S)
+destinations use the literal-address, hostname, and local-DNS policy, with
+WS(S) normalized only for validation. CDP-presented =data:=, =blob:=, and
+=about:= requests are the explicit non-network allowlist; unsupported schemes
+fail. Redirect and subresource checks remain defense in depth, not an
+end-to-end SSRF boundary. The remote Browser Use environment can resolve a
+hostname differently from the local Autolith host, while the inspected managed
+gateway contract exposes no destination-pinning or network-policy endpoint.
+Same-network enforcement is therefore a Browser Use/Nous gateway trust
+requirement. Autolith cannot claim an SSRF boundary across differing local and
+remote DNS views.
 
 Mocked lifecycle and CDP tests cover retry idempotency, headers and payloads,
-correlation, events, practical action commands, schema gating, denial before
-creation, child isolation, cleanup, stale refs, screenshots, status, and message
-bounds.
+correlation, events, all-pattern interception, HTTP(S) and WS(S) destination
+policy, explicit non-network schemes, unsupported schemes, practical action
+commands, schema gating, denial before creation, child isolation, cleanup,
+stale refs, screenshots, status, and message bounds.

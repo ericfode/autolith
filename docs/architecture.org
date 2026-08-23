@@ -125,12 +125,15 @@ provider request --> semantic events --> agent --> validated tool calls
   the session; a bounded correlated CDP WebSocket performs all page actions.
   Accessibility refs are snapshot-generation state and screenshots reuse the
   private image attachment pipeline. There is no browser fallback.
-- CDP Fetch interception applies literal-address, hostname, local-DNS,
-  redirect, and subresource checks as defense in depth. The managed Browser
-  Use contract has no destination-pinning or network-policy endpoint, and its
-  remote DNS view can differ from Autolith's local view. Same-network
-  enforcement is therefore a Browser Use/Nous gateway trust requirement;
-  Autolith does not provide an SSRF boundary across differing DNS views.
+- CDP Fetch interception covers every request URL pattern. HTTP(S) and WS(S)
+  destinations use the literal-address, hostname, and local-DNS policy, with
+  WS(S) normalized only for validation. The explicit non-network allowlist is
+  =data:=, =blob:=, and =about:=; unsupported schemes fail. Redirect and
+  subresource checks are defense in depth. The managed Browser Use contract
+  has no destination-pinning or network-policy endpoint, and its remote DNS
+  view can differ from Autolith's local view. Same-network enforcement is
+  therefore a Browser Use/Nous gateway trust requirement; Autolith does not
+  provide an SSRF boundary across differing DNS views.
 - The terminal route selects either the local command adapter or one lazy
   agent-owned managed Modal sandbox. Route declarations never imply a hidden
   local or provider fallback.

@@ -245,13 +245,27 @@
                   (test-browser-cdp-transport-messages transport)))
                (methods
                  (mapcar (lambda (document) (json-get document "method"))
-                         documents)))
+                         documents))
+               (fetch-enable
+                 (find "Fetch.enable" documents
+                       :key (lambda (document) (json-get document "method"))
+                       :test #'string=))
+               (patterns
+                 (and fetch-enable
+                      (json-get (json-get fetch-enable "params") "patterns"))))
           (test-assert
            (every (lambda (method) (member method methods :test #'string=))
                   '("Fetch.enable" "Page.navigate" "Accessibility.getFullAXTree"
                     "Input.dispatchMouseEvent" "Input.insertText"
                     "Input.dispatchKeyEvent" "Page.captureScreenshot"))
            "practical browser actions issue the expected CDP commands")
+          (test-assert
+           (and (vectorp patterns)
+                (= (length patterns) 1)
+                (string= (or (json-get (aref patterns 0) "urlPattern") "") "*")
+                (string= (or (json-get (aref patterns 0) "requestStage") "")
+                         "Request"))
+           "Fetch interception covers every request URL pattern")
           (test-assert
            (and (< (position "Fetch.enable" methods :test #'string=)
                    (position "Page.enable" methods :test #'string=))
@@ -341,7 +355,7 @@
                            (string= (or (json-get command "method") "")
                                     "Fetch.continueRequest"))
                          commands)
-                        "public requests continue through Fetch interception"))))))
+                        "allowed requests continue through Fetch interception"))))))
       (dolist
           (case
            (list
@@ -392,6 +406,94 @@
                (string= (or (json-get command "method") "") "Page.navigate"))
              :url "http://10.0.0.1/private.js"
              :resource-type "Script"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "private-ws"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "ws://127.0.0.1/socket"
+             :resource-type "WebSocket"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "private-wss"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "wss://[::1]/socket"
+             :resource-type "WebSocket"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "public-ws"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "ws://93.184.216.34/socket"
+             :resource-type "WebSocket"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "public-wss"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "wss://93.184.216.34/socket"
+             :resource-type "WebSocket"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "data-document"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "data:text/plain,managed-browser"
+             :resource-type "Document"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "blob-document"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "blob:https://93.184.216.34/browser-object"
+             :resource-type "Document"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "about-document"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "about:blank"
+             :resource-type "Document"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "unsupported-network-scheme"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "ftp://93.184.216.34/file"
+             :resource-type "Document"
              :blocked-p t
              :action
              (lambda (runtime)

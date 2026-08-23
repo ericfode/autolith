@@ -342,13 +342,16 @@ Gateway, authentication, CDP, timeout, stale-ref, and bounds failures never
 fall back to another browser. =AUTOLITH_NOUS_BROWSER_GATEWAY_URL= can override
 the default Browser Use gateway with another HTTPS origin.
 
-Autolith keeps literal-address, hostname, local-DNS, redirect, and subresource
-checks through CDP Fetch interception as defense in depth. The cloud browser
-and the local Autolith process can have different DNS views, however, and the
-managed gateway contract provides no destination-pinning or network-policy
-endpoint. Same-network destination enforcement is therefore a Browser
-Use/Nous gateway trust requirement. Autolith cannot claim an SSRF boundary
-when the local and remote DNS views differ.
+Autolith intercepts every CDP request URL pattern. HTTP, HTTPS, WS, and WSS
+requests pass through the literal-address, hostname, and local-DNS policy; WS
+and WSS are normalized to HTTP and HTTPS only for validation. CDP-presented
+=data:=, =blob:=, and =about:= document requests are allowed explicitly, while
+unsupported schemes are failed. These checks cover redirects and subresources
+as defense in depth. The cloud browser and local Autolith process can have
+different DNS views, and the managed gateway contract provides no
+destination-pinning or network-policy endpoint. Same-network destination
+enforcement is therefore a Browser Use/Nous gateway trust requirement.
+Autolith cannot claim an SSRF boundary when local and remote DNS views differ.
 
 Selecting =/terminal modal= routes authorized =shell.run= commands to one lazy,
 persistent Nous-managed Modal sandbox for that agent. The sandbox uses the Nous

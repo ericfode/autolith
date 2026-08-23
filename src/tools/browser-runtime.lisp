@@ -31,7 +31,11 @@
   "The maximum model-visible browser.snapshot text length.")
 
 (defparameter *nous-browser-maximum-pending-request-interceptions* 256
-  "The most paused browser requests queued for public-URL validation.")
+  "The most paused browser requests queued for destination-policy validation.")
+
+(defparameter *nous-browser-allowed-non-network-request-schemes*
+  '("about" "blob" "data")
+  "The non-network URL schemes CDP may pause and Autolith may continue.")
 
 (defparameter *nous-browser-http-request-function* nil
   "Optional test transport replacing managed browser lifecycle HTTP.")
@@ -85,14 +89,14 @@
     :initarg :url
     :reader nous-browser-request-blocked-url
     :type string
-    :documentation "The HTTP(S) request URL rejected by the public URL policy.")
+    :documentation "The request URL rejected by the browser destination policy.")
    (resource-type
     :initarg :resource-type
     :initform nil
     :reader nous-browser-request-blocked-resource-type
     :type (option string)
     :documentation "The CDP resource type of the blocked request, when available."))
-  (:documentation "A managed browser request was prevented from reaching a non-public URL."))
+  (:documentation "A managed browser request was rejected by destination policy."))
 
 (-> nous-browser--fail (keyword string &rest t) null)
 (defun nous-browser--fail (stage control &rest arguments)
@@ -721,6 +725,35 @@
 
 ;;;; -- Request Interception --
 
+(-> nous-browser--allowed-request-url-p (string) boolean)
+(defun nous-browser--allowed-request-url-p (url)
+  "Return true when URL is a permitted browser request destination.
+
+HTTP, HTTPS, WS, and WSS destinations pass through the managed web public-host,
+literal-address, and local-DNS policy. WS and WSS are normalized only for that
+validation. CDP-presented ABOUT, BLOB, and DATA requests do not perform network
+access and are permitted explicitly."
+  (handler-case
+      (let* ((uri (quri:uri url))
+             (scheme (string-downcase (or (quri:uri-scheme uri) ""))))
+        (cond
+          ((member scheme '("http" "https") :test #'string=)
+           (nous-web--public-url-p url))
+          ((member scheme '("ws" "wss") :test #'string=)
+           (nous-web--public-url-p
+            (quri:render-uri
+             (quri:copy-uri
+              uri
+              :scheme (if (string= scheme "ws") "http" "https")))))
+          ((member scheme
+                   *nous-browser-allowed-non-network-request-schemes*
+                   :test #'string=)
+           t)
+          (t
+           nil)))
+    (error ()
+      nil)))
+
 (-> nous-browser-runtime--record-request-failure
     (nous-browser-runtime condition) null)
 (defun nous-browser-runtime--record-request-failure (runtime failure)
@@ -773,7 +806,7 @@
 (-> nous-browser-runtime--process-request
     (nous-browser-runtime json-object) null)
 (defun nous-browser-runtime--process-request (runtime event)
-  "Validate and continue or fail one paused HTTP(S) request EVENT."
+  "Validate and continue or fail one paused browser request EVENT."
   (let* ((parameters (json-get event "params"))
          (request-id (and (json-object-p parameters)
                           (json-get parameters "requestId")))
@@ -792,7 +825,7 @@
              :message "Managed browser received a malformed paused request event."
              :tool-name "browser"
              :stage ':request-policy))
-    (if (nous-web--public-url-p url)
+    (if (nous-browser--allowed-request-url-p url)
         (browser-cdp-command
          connection "Fetch.continueRequest"
          (json-object "requestId" request-id)
@@ -801,10 +834,10 @@
                 (make-condition
                  'nous-browser-request-blocked
                  :message
-                 (format nil "Managed browser blocked a non-public ~A request to ~A."
+                 (format nil "Managed browser blocked a disallowed ~A request to ~A."
                          (if (non-empty-string-p resource-type)
                              resource-type
-                             "HTTP(S)")
+                             "network")
                          (bounded-string url :limit 500))
                  :tool-name "browser"
                  :stage ':request-policy
@@ -987,9 +1020,7 @@
          connection "Fetch.enable"
          (json-object
           "patterns"
-          (vector
-           (json-object "urlPattern" "http://*" "requestStage" "Request")
-           (json-object "urlPattern" "https://*" "requestStage" "Request")))
+          (vector (json-object "urlPattern" "*" "requestStage" "Request")))
          :session-id session-id)
         (dolist (method '("Page.enable" "DOM.enable" "Runtime.enable"
                           "Accessibility.enable"))
