@@ -208,6 +208,7 @@
     (test-openai-compatible-provider)
     (test-anthropic-provider)
     (test-nous-provider)
+    (test-nous-web)
     (test-fireworks-provider)
     (test-opencode-provider)
     (test-resource-protocol)

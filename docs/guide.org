@@ -265,16 +265,25 @@ use the native Anthropic Messages route; the rest use OpenAI-compatible Chat
 Completions. Hermes model identifiers are omitted from the catalog because they
 are not reliable for agentic tool calling.
 
-The Nous integration accepts three deployment overrides:
+The Nous integration accepts four deployment overrides:
 
 - =AUTOLITH_NOUS_PORTAL_URL= selects the OAuth portal.
 - =AUTOLITH_NOUS_INFERENCE_BASE_URL= selects the =/v1= inference base used for
   model discovery, Chat Completions, and Messages.
 - =AUTOLITH_NOUS_PROVIDER_ENDPOINT= overrides only the Chat Completions endpoint.
+- =AUTOLITH_NOUS_FIRECRAWL_GATEWAY_URL= selects the managed Firecrawl gateway.
 
 Autolith stores Nous OAuth state separately at =nous-auth.sexp= under its state
 root and serializes rotating refresh-token updates across processes sharing that
 root.
+
+Nous =web.run= uses the managed Firecrawl gateway with the same OAuth account.
+It supports web search, image search, opening public absolute HTTP(S) URLs, and
+finding text within those URLs. One call accepts at most four operations.
+Gateway calls may consume Nous subscription tool credits. The gateway has no
+cached or indexed mode, so every =AUTOLITH_WEB_SEARCH= setting except =disabled=
+uses live managed Firecrawl requests; =AUTOLITH_WEB_SEARCH=disabled= disables
+the tool.
 
 ** Commands
 

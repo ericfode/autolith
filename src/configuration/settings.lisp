@@ -57,6 +57,10 @@
 (defparameter *nous-oauth-scope* "inference:invoke"
   "The OAuth scope required to invoke Nous Research inference models.")
 
+(defparameter *nous-firecrawl-gateway-url*
+  "https://firecrawl-gateway.nousresearch.com"
+  "The managed Firecrawl origin supplied by the Nous Tool Gateway.")
+
 (-> nous-portal-url () string)
 (defun nous-portal-url ()
   "Return the configured Nous Research portal URL."
@@ -74,6 +78,42 @@
      (if (non-empty-string-p override)
          override
          *nous-inference-base-url*))))
+
+(-> nous-firecrawl-gateway-url () string)
+(defun nous-firecrawl-gateway-url ()
+  "Return the validated HTTPS origin for Nous managed Firecrawl requests."
+  (let* ((override (uiop:getenv "AUTOLITH_NOUS_FIRECRAWL_GATEWAY_URL"))
+         (value
+           (string-right-trim
+            '(#\/)
+            (if (non-empty-string-p override)
+                override
+                *nous-firecrawl-gateway-url*)))
+         (uri
+           (handler-case
+               (quri:uri value)
+             (error ()
+               nil))))
+    (unless (and uri
+                 (string= (or (quri:uri-scheme uri) "") "https")
+                 (non-empty-string-p (quri:uri-host uri))
+                 (not (non-empty-string-p (quri:uri-userinfo uri)))
+                 (not (non-empty-string-p (quri:uri-query uri)))
+                 (not (non-empty-string-p (quri:uri-fragment uri))))
+      (error 'configuration-error
+             :message
+             "AUTOLITH_NOUS_FIRECRAWL_GATEWAY_URL must be an HTTPS URL without user information, a query, or a fragment."))
+    value))
+
+(-> nous-firecrawl-search-endpoint () string)
+(defun nous-firecrawl-search-endpoint ()
+  "Return the managed Firecrawl v2 search endpoint."
+  (concatenate 'string (nous-firecrawl-gateway-url) "/v2/search"))
+
+(-> nous-firecrawl-scrape-endpoint () string)
+(defun nous-firecrawl-scrape-endpoint ()
+  "Return the managed Firecrawl v2 scrape endpoint."
+  (concatenate 'string (nous-firecrawl-gateway-url) "/v2/scrape"))
 
 (-> nous-chat-completions-endpoint () string)
 (defun nous-chat-completions-endpoint ()

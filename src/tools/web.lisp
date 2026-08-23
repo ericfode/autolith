@@ -397,31 +397,47 @@ commit ba42e6866cef4baed7ad92c73e6be8cd42e49d8b."
       "external_web_access" (web--external-web-access configuration))
      "max_output_tokens" 4000)))
 
+(-> provider-web-run
+    (model-provider oauth-credentials tool-context &key (:commands json-object))
+    tool-result)
+(defgeneric provider-web-run (provider credentials context &key commands)
+  (:documentation
+   "Execute provider-specific web COMMANDS with request-scoped CREDENTIALS."))
+
+(defmethod provider-web-run
+    ((provider subscription-provider)
+     (credentials oauth-credentials)
+     (context tool-context)
+     &key (commands (json-object)))
+  "Run COMMANDS through a provider's standalone search endpoint."
+  (let* ((configuration (tool-context-configuration context))
+         (conversation (tool-context-conversation context)))
+    (multiple-value-bind (body status headers)
+        (dexador:post (web--search-endpoint configuration)
+                      :headers (provider-web-search-request-headers
+                                provider credentials conversation)
+                      :content (json-encode
+                                (web--search-request context provider commands)))
+      (declare (ignore headers))
+      (unless (= status 200)
+        (error 'tool-error
+               :message (format nil "Provider web search returned HTTP ~D." status)
+               :tool-name "web.run"))
+      (let ((output (json-get (json-decode body) "output")))
+        (unless (non-empty-string-p output)
+          (error 'tool-error
+                 :message "Provider web search returned no text output."
+                 :tool-name "web.run"))
+        (tool-success output)))))
+
 (defmethod tool-execute ((tool web-run-tool) (context tool-context) (arguments hash-table))
-  "Run one Codex-compatible standalone web command batch."
+  "Run one provider-compatible web command batch."
   (declare (ignore tool))
   (let* ((configuration (tool-context-configuration context))
-         (provider (provider-create configuration))
-         (conversation (tool-context-conversation context)))
+         (provider (provider-create configuration)))
     (when (string= (configuration-web-search-mode configuration) "disabled")
       (error 'tool-error
              :message "Provider web search is disabled by configuration."
              :tool-name "web.run"))
     (with-credentials (credentials (provider-credential-manager provider))
-      (multiple-value-bind (body status headers)
-          (dexador:post (web--search-endpoint configuration)
-                        :headers (provider-web-search-request-headers
-                                  provider credentials conversation)
-                        :content (json-encode
-                                  (web--search-request context provider arguments)))
-        (declare (ignore headers))
-        (unless (= status 200)
-          (error 'tool-error
-                 :message (format nil "Provider web search returned HTTP ~D." status)
-                 :tool-name "web.run"))
-        (let ((output (json-get (json-decode body) "output")))
-          (unless (non-empty-string-p output)
-            (error 'tool-error
-                   :message "Provider web search returned no text output."
-                   :tool-name "web.run"))
-          (tool-success output))))))
+      (provider-web-run provider credentials context :commands arguments))))
