@@ -51,7 +51,10 @@ explicit pathname when necessary:
           autolith-executable "/path/to/autolith")
 #+END_SRC
 
-Reload the Spacemacs configuration after adding the layer.
+Restart Spacemacs after first adding the custom layer path. An already-running
+Spacemacs process still has a stale preflight layer index; use
+~SPC u SPC u SPC f e R~ to skip that preflight and reload while refreshing the
+index.
 
 * Use
 
