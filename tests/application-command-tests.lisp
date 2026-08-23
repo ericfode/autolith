@@ -422,6 +422,10 @@
          ("/cwd /tmp" :hold)
          ("/model" :hold)
          ("/model gpt-5.6-sol" :apply)
+          ("/tools" :execute)
+          ("/tools web nous" :apply)
+          ("/terminal" :execute)
+          ("/terminal modal" :apply)
          ("/effort" :hold)
          ("/effort high" :apply)
          ("/trace" :execute)
@@ -493,6 +497,8 @@
          ("/cwd" (pathname) :remainder)
          ("/auth" (&optional (provider-name nil provider-name-supplied-p)) :remainder)
          ("/model" (&optional (model nil model-supplied-p)) :first)
+          ("/tools" (&optional capability route) :tokens)
+          ("/terminal" (&optional route) :first)
          ("/trace" (mode) :first)
          ("/permissions" (&optional (choice nil choice-supplied-p)) :first)
          ("/later" (input) :remainder)
@@ -511,8 +517,9 @@
          (format nil "~A retains its ordinary call and slash semantics" name)))))
   (dolist
       (case
-       '(("/auth grok typo" ("grok typo"))
-         ("/mcp refresh typo" ("refresh typo"))))
+        '(("/auth grok typo" ("grok typo"))
+          ("/mcp refresh typo" ("refresh typo"))
+          ("/tools web nous" ("web" "nous"))))
     (destructuring-bind (input expected) case
       (test-assert
        (equal (application-command-invocation-arguments

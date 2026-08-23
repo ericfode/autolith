@@ -88,6 +88,9 @@ The library we use is =sexp-store=,
 - Conversation records are authoritative provider history
 - The header records the selected model and effort. Later changes are
   durable configuration records, so resume restores the latest choices
+- Capability routes belong to immutable per-launcher configuration, not global
+  preferences or conversation records. Versioned recovery-session pointers
+  restore web, browser, and terminal choices for only their launcher.
 - Identifiers use =idsmall= Base58 IDs, which are not the most secure, but they encode a timestamp and are short enough that
   you can at least remember the prefix.
 
@@ -110,6 +113,15 @@ provider request --> semantic events --> agent --> validated tool calls
 - A provider request sees tokens only in its dynamic scope
 - The optional Codex file is a one-time access-token import
 - Renewable credentials come from Autolith's own device flow
+- Inference provider selection and capability routing are separate. =web.run=
+  derives both its model-visible schema and execution credential manager from
+  the session web route. The default =:inference= route preserves provider
+  behavior; the explicit =:nous= route uses managed Firecrawl without fallback.
+- Task child configurations clone capability routes. Existing tool policy still
+  removes web access when the child role does not permit it.
+- Browser and terminal routes are represented in configuration before their
+  stateful runtime adapters are added. Route declarations never imply a hidden
+  local or provider fallback.
 
 * Workspace and workers
 

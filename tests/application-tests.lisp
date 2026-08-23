@@ -4025,6 +4025,28 @@
                    (= rendered-sequence 4)
                    (= history-floor-sequence 2))
               "an invalid crash capsule falls back to validated session state"))
+            (multiple-value-bind (web-route browser-route terminal-route)
+                (application-recovery-capability-routes configuration)
+              (test-assert
+               (and (null web-route) (null browser-route) (null terminal-route))
+               "version-one recovery records retain default capability routes"))
+            (snapshot-write
+             session-pathname
+             (list :recovery-session
+                   :version 2
+                   :conversation-id "2345678"
+                   :rendered-sequence 4
+                   :history-floor-sequence 2
+                   :web-route ':nous
+                   :browser-route ':nous
+                   :terminal-route ':modal))
+            (multiple-value-bind (web-route browser-route terminal-route)
+                (application-recovery-capability-routes configuration)
+              (test-assert
+               (and (eq web-route ':nous)
+                    (eq browser-route ':nous)
+                    (eq terminal-route ':modal))
+               "version-two recovery records restore per-launch capability routes"))
            (test-assert
             (null (application-recovery-diagnosis-prompt configuration))
             "an invalid crash capsule does not queue diagnosis")
@@ -8576,7 +8598,11 @@
 (-> test-status-entry () null)
 (defun test-status-entry ()
   "Test /status token accounting and rate limit presentation."
-  (let* ((configuration (test-configuration))
+  (let* ((configuration
+           (configuration--clone (test-configuration)
+                                 :web-route ':nous
+                                 :browser-route ':nous
+                                 :terminal-route ':modal))
          (root (test-configuration-root configuration)))
     (unwind-protect
          (let* ((conversation (conversation-create configuration
@@ -8633,8 +8659,15 @@
              (test-assert (and (search "reasoning trace" text)
                                (search "hidden" text))
                           "status reports the reasoning-summary display mode")
-             (test-assert (search "compacts at 80%" text)
-                          "status reports the compaction threshold")))
+              (test-assert (search "compacts at 80%" text)
+                           "status reports the compaction threshold")
+              (test-assert
+               (and (search "web route" text)
+                    (search "browser route" text)
+                    (search "terminal route" text)
+                    (search "nous" text)
+                    (search "modal" text))
+               "status reports all session-local capability routes")))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist ':ignore)))
   nil)
 

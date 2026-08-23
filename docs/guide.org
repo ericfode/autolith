@@ -285,6 +285,38 @@ cached or indexed mode, so every =AUTOLITH_WEB_SEARCH= setting except =disabled=
 uses live managed Firecrawl requests; =AUTOLITH_WEB_SEARCH=disabled= disables
 the tool.
 
+*** Session capability routes
+
+Inference and external capabilities are selected independently for each
+launcher session. Route changes do not use global preferences and do not affect
+other running launchers. The launcher recovery-session record restores them
+after a crash or restart, and permitted task children inherit the parent
+configuration.
+
+#+BEGIN_SRC text
+/tools
+/tools web nous
+/tools web inference
+/tools browser nous
+/tools browser disabled
+/terminal modal
+/terminal local
+#+END_SRC
+
+The equivalent Lisp forms are =(tools)=, =(tools "web" "nous")=,
+=(tools "browser" "nous")=, and =(terminal "modal")=. =/status= and =/info=
+show the effective session selections.
+
+The default routes are web through the inference provider, browser disabled,
+and the local terminal. Selecting Nous web while Codex is the inference
+provider advertises and executes the managed Firecrawl contract with the
+independent Nous OAuth credential manager. Failures are reported from Nous and
+never fall back to the inference provider.
+
+Browser and Modal selections are session configuration in this release. Their
+runtime implementations are separate later slices; this release does not add
+browser tools or redirect local shell execution.
+
 ** Commands
 
 #+BEGIN_SRC lisp

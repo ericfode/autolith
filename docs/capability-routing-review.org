@@ -1,0 +1,27 @@
+#+title: Capability routing review note
+
+* Upstream reference
+
+The Nous Tool Gateway behavior was reviewed against the read-only checkout at:
+
+- repository: =/Users/ericfode/src/hermes-agent-reference=
+- inspected commit: =981101239a064c020a9d18fc3b1060ae306934ed=
+
+This checkout is a research input, not an Autolith dependency.
+
+* First vertical slice
+
+This slice adds immutable session capability routes for web, browser, and
+terminal selection. Route choices live in each launcher's runtime
+configuration and version-two recovery-session record. Version-one records
+remain readable and preserve the defaults.
+
+Only the web route has an executor in this slice. An explicit =:nous= route
+changes both the provider-visible =web.run= schema and execution credentials to
+Nous managed Firecrawl while inference can remain Codex. The default
+=:inference= route retains prior behavior. There is no silent fallback.
+
+Browser and Modal runtime adapters are deliberately outside this slice. Their
+route values are serialized now so later stateful implementations can use the
+same per-launcher configuration boundary without migrating a global
+preference.

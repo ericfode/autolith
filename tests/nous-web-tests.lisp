@@ -61,6 +61,69 @@
       (list #(93 184 216 34)))))
 
 
+(-> nous-web-test--session-routing () null)
+(defun nous-web-test--session-routing ()
+  "Test web schema, credentials, and execution follow the session route."
+  (let* ((base (test-configuration))
+         (configuration
+           (configuration--clone base :web-route ':nous))
+         (context (nous-web-test--context configuration))
+         (tool
+           (make-instance 'web-run-tool
+                          :namespace "web"
+                          :name "run"
+                          :description *web-run-description*
+                          :parameters (web-run-parameters)))
+         (credentials (nous-web-test--credentials configuration))
+         (selected-provider nil)
+         (selected-manager nil))
+    (test-call-with-function-replacements
+     (list
+      (list 'provider-create
+            (lambda (configuration)
+              (declare (ignore configuration))
+              (error "Inference provider creation must not serve an explicit Nous web route.")))
+      (list 'call-with-credentials
+            (lambda (manager function &key force-refresh)
+              (declare (ignore force-refresh))
+              (setf selected-manager manager)
+              (funcall function credentials)))
+      (list 'provider-web-run
+            (lambda (provider credentials context &key commands)
+              (declare (ignore credentials context commands))
+              (setf selected-provider provider)
+              (tool-success "routed"))))
+     (lambda ()
+       (let ((result (tool-execute tool context (json-object))))
+         (test-assert
+          (and (tool-result-success-p result)
+               (typep selected-provider 'nous-provider-mixin)
+               (typep selected-manager 'nous-credential-manager))
+          "an explicit Nous web route uses Nous credentials and execution independently"))))
+    (let* ((provider (provider-create configuration))
+           (conversation (tool-context-conversation context))
+           (namespace
+             (json-object
+              "type" "namespace"
+              "name" "web"
+              "description" "ordinary web"
+              "tools"
+              (json-array
+               (json-object "name" "run"
+                            "description" *web-run-description*
+                            "parameters" (web-run-parameters)))))
+           (encoded
+             (json-encode
+              (provider-request-object provider conversation
+                                       (json-array namespace)))))
+      (test-assert
+       (and (search "Nous Tool Gateway managed web access" encoded)
+            (search "image_query" encoded)
+            (null (search "screenshot" encoded)))
+       "Codex inference advertises the managed Firecrawl schema when routed to Nous")))
+  nil)
+
+
 ;;;; -- Provider Schema and Configuration --
 
 (-> nous-web-test--schema-and-configuration () null)
@@ -671,6 +734,7 @@
 (-> test-nous-web () null)
 (defun test-nous-web ()
   "Run Nous Tool Gateway web access tests."
+  (nous-web-test--session-routing)
   (nous-web-test--schema-and-configuration)
   (nous-web-test--transport)
   (nous-web-test--validation-and-failures)

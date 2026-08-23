@@ -243,18 +243,24 @@
                (conversation (application-conversation application)))
           (when pathname
             (let* ((record
-                     (and
-                      (conversation-persisted-p conversation)
-                      (list :recovery-session
-                            :version 1
-                            :conversation-id
-                            (conversation-identifier conversation)
-                            :rendered-sequence
-                            (max
-                             0
-                             (application-rendered-sequence application))
-                            :history-floor-sequence
-                            (application-history-floor-sequence application))))
+                      (and
+                       (conversation-persisted-p conversation)
+                       (list :recovery-session
+                             :version 2
+                             :conversation-id
+                             (conversation-identifier conversation)
+                             :rendered-sequence
+                             (max
+                              0
+                              (application-rendered-sequence application))
+                             :history-floor-sequence
+                             (application-history-floor-sequence application)
+                             :web-route
+                             (configuration-web-route configuration)
+                             :browser-route
+                             (configuration-browser-route configuration)
+                             :terminal-route
+                             (configuration-terminal-route configuration))))
                    (publication
                      (list (namestring pathname) record)))
               (unless
@@ -847,6 +853,10 @@ newly acquired lease."
     (let* ((recovery-state
              (multiple-value-list
               (application-recovery-state preferred-configuration)))
+            (recovery-capability-routes
+              (multiple-value-list
+               (application-recovery-capability-routes
+                preferred-configuration)))
            (recovery-conversation-id (first recovery-state))
            (selected-conversation-id
              (application--selected-conversation-id
@@ -876,6 +886,13 @@ newly acquired lease."
                     (setf preferred-configuration
                           (preferences-apply-model-selection
                            preferred-configuration))
+                     (when (first recovery-capability-routes)
+                       (setf preferred-configuration
+                             (configuration--clone
+                              preferred-configuration
+                              :web-route (first recovery-capability-routes)
+                              :browser-route (second recovery-capability-routes)
+                              :terminal-route (third recovery-capability-routes))))
                     (multiple-value-setq
                         (conversation
                          conversation-lease
@@ -1052,6 +1069,9 @@ newly acquired lease."
                    :reasoning-effort
                    (configuration-reasoning-effort previous)
                    :immutable-p effective-immutable-p
+                    :web-route (configuration-web-route previous)
+                    :browser-route (configuration-browser-route previous)
+                    :terminal-route (configuration-terminal-route previous)
                    :defer-provider-validation-p t))
                 (prepared-configuration
                   (progn
@@ -1286,6 +1306,7 @@ newly acquired lease."
           (application-conversation application) active-conversation
           (application-provider application) provider
           (application-agent application) agent))
+    (application-publish-recovery-session application)
   nil)
 
 (-> application--agent-adopt-runtime (application agent) null)

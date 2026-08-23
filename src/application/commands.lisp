@@ -279,6 +279,18 @@
                                (configuration-reasoning-effort configuration))
      (application--field-spans "web search"
                                (configuration-web-search-mode configuration))
+      (application--field-spans "web route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-web-route configuration))))
+      (application--field-spans "browser route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-browser-route configuration))))
+      (application--field-spans "terminal route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-terminal-route configuration))))
      (application--field-spans
       "trace"
       (application--toggle-state
@@ -337,6 +349,18 @@
                                "standard (the fast path is never requested)")
      (application--field-spans "web search"
                                (configuration-web-search-mode configuration))
+      (application--field-spans "web route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-web-route configuration))))
+      (application--field-spans "browser route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-browser-route configuration))))
+      (application--field-spans "terminal route"
+                                (string-downcase
+                                 (symbol-name
+                                  (configuration-terminal-route configuration))))
      (application--field-spans "goal"
                                (let ((goal (application-goal application)))
                                  (if goal
@@ -565,6 +589,94 @@
                                           previous-model
                                           previous-effort)
         (error condition))))
+  nil)
+
+(-> application--route-name (keyword) string)
+(defun application--route-name (route)
+  "Return ROUTE as a lowercase user-facing name."
+  (string-downcase (symbol-name route)))
+
+(-> application-tools-command
+    (application &optional (option string) (option string))
+    null)
+(defun application-tools-command (application &optional capability route)
+  "Show or change APPLICATION's session-local web or browser route."
+  (let* ((configuration (application-configuration application))
+         (capability (and capability (string-downcase capability)))
+         (route (and route (string-downcase route))))
+    (cond
+      ((null capability)
+       (application-present
+        application
+        (format nil "Session tool routes: web=~A, browser=~A."
+                (application--route-name
+                 (configuration-web-route configuration))
+                (application--route-name
+                 (configuration-browser-route configuration)))))
+      ((null route)
+       (error 'configuration-error
+              :message "Usage: /tools web inference|nous or /tools browser disabled|nous."))
+      ((string= capability "web")
+       (let ((selected
+               (cond
+                 ((string= route "inference") ':inference)
+                 ((string= route "nous") ':nous)
+                 (t
+                  (error 'configuration-error
+                         :message "The web route must be inference or nous.")))))
+         (application--install-configuration
+          application
+          (configuration-with-web-route configuration selected))
+         (application-present
+          application
+          (format nil "This session now routes web.run through ~A."
+                  (application--route-name selected)))))
+      ((string= capability "browser")
+       (let ((selected
+               (cond
+                 ((member route '("disabled" "off") :test #'string=)
+                  ':disabled)
+                 ((string= route "nous") ':nous)
+                 (t
+                  (error 'configuration-error
+                         :message "The browser route must be disabled or nous.")))))
+         (application--install-configuration
+          application
+          (configuration-with-browser-route configuration selected))
+         (application-present
+          application
+          (format nil "This session's browser route is now ~A."
+                  (application--route-name selected)))))
+      (t
+       (error 'configuration-error
+              :message "The capability must be web or browser."))))
+  nil)
+
+(-> application-terminal-command (application &optional (option string)) null)
+(defun application-terminal-command (application &optional route)
+  "Show or change APPLICATION's session-local terminal backend route."
+  (let* ((configuration (application-configuration application))
+         (route (and route (string-downcase route))))
+    (if (null route)
+        (application-present
+         application
+         (format nil "This session's terminal route is ~A."
+                 (application--route-name
+                  (configuration-terminal-route configuration))))
+        (let ((selected
+                (cond
+                  ((string= route "local") ':local)
+                  ((string= route "modal") ':modal)
+                  (t
+                   (error 'configuration-error
+                          :message "The terminal route must be local or modal.")))))
+          (application--install-configuration
+           application
+           (configuration-with-terminal-route configuration selected))
+          (application-present
+           application
+           (format nil "This session's terminal route is now ~A."
+                   (application--route-name selected))))))
   nil)
 
 (-> application-set-reasoning-effort (application string) null)
@@ -1969,6 +2081,32 @@ to TERMINAL-UI-SELECT."
                    (application--pick-authentication-provider application)))))
     (when provider-name
       (application-authenticate application provider-name)))
+  ':continue)
+
+(define-application-command application--builtin-tools-command
+    (:name "/tools"
+     :argument "[web|browser ROUTE]"
+     :description "show or select session capability routes"
+     :tip "routes web and browser capabilities independently from inference."
+     :busy-behavior :apply
+     :terminal-behavior :shared
+     :call-lambda-list (&optional capability route)
+     :slash-argument-mode :tokens)
+    (application &optional capability route)
+  (application-tools-command application capability route)
+  ':continue)
+
+(define-application-command application--builtin-terminal-command
+    (:name "/terminal"
+     :argument "[local|modal]"
+     :description "show or select this session's terminal backend"
+     :tip "selects a terminal backend without changing inference or web routing."
+     :busy-behavior :apply
+     :terminal-behavior :shared
+     :call-lambda-list (&optional route)
+     :slash-argument-mode :first)
+    (application &optional route)
+  (application-terminal-command application route)
   ':continue)
 
 (define-application-command application--builtin-model-command

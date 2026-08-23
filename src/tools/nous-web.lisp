@@ -2,9 +2,10 @@
 
 ;;;; -- Nous Tool Gateway Web Access --
 
-;;; The managed Firecrawl contract follows NousResearch/hermes-agent reference
-;;; commit f293e7206b4ddd66042329442c6afebc19a8808d. The gateway accepts the
-;;; ordinary Firecrawl v2 search and scrape routes with the Nous OAuth bearer.
+;;; The managed Firecrawl contract follows the read-only
+;;; /Users/ericfode/src/hermes-agent-reference checkout at commit
+;;; 981101239a064c020a9d18fc3b1060ae306934ed. The gateway accepts ordinary
+;;; Firecrawl v2 search and scrape routes with the Nous OAuth bearer.
 
 (defparameter *nous-web-run-description*
   "Web access through the Nous Tool Gateway's managed Firecrawl service.
@@ -175,16 +176,21 @@ the active Nous OAuth account and may consume Nous subscription tool credits."
        tool-namespaces))
 
 (defmethod provider-request-object :around
-    ((provider nous-provider-mixin)
+    ((provider subscription-provider)
      (conversation conversation)
      (tool-namespaces vector)
      &key goal-context compaction-p)
-  "Advertise the managed Firecrawl subset of web.run to Nous models."
-  (call-next-method provider
-                    conversation
-                    (nous-web--provider-tool-namespaces tool-namespaces)
-                    :goal-context goal-context
-                    :compaction-p compaction-p))
+  "Advertise the managed Firecrawl schema when this session routes web to Nous."
+  (call-next-method
+   provider
+   conversation
+   (if (eq (configuration-effective-web-route
+            (provider-configuration provider))
+           ':nous)
+       (nous-web--provider-tool-namespaces tool-namespaces)
+       tool-namespaces)
+   :goal-context goal-context
+   :compaction-p compaction-p))
 
 
 ;;;; -- Gateway Transport --

@@ -274,6 +274,18 @@ configuration can be created before executable user initialization loads."
                                            (user-homedir-pathname)))))
 
 
+;;;; -- Session Capability Routes --
+
+(defparameter *supported-web-routes* '(:inference :nous)
+  "The session-scoped providers accepted for web.run.")
+
+(defparameter *supported-browser-routes* '(:disabled :nous)
+  "The session-scoped providers accepted for browser automation.")
+
+(defparameter *supported-terminal-routes* '(:local :modal)
+  "The session-scoped terminal backends accepted by configuration.")
+
+
 ;;;; -- Configuration Object --
 
 (defclass configuration ()
@@ -341,6 +353,24 @@ configuration can be created before executable user initialization loads."
     :reader configuration-web-search-mode
     :type non-empty-string
     :documentation "The provider web search mode: cached, indexed, live, or disabled.")
+   (web-route
+    :initarg :web-route
+    :initform ':inference
+    :reader configuration-web-route
+    :type (member :inference :nous)
+    :documentation "The session-local provider route for web.run.")
+   (browser-route
+    :initarg :browser-route
+    :initform ':disabled
+    :reader configuration-browser-route
+    :type (member :disabled :nous)
+    :documentation "The session-local provider route for browser automation.")
+   (terminal-route
+    :initarg :terminal-route
+    :initform ':local
+    :reader configuration-terminal-route
+    :type (member :local :modal)
+    :documentation "The session-local terminal backend selection.")
    (context-window
     :initarg :context-window
     :initform *default-context-window*
@@ -448,16 +478,20 @@ AUTOLITH_OPENCODE_PROVIDER_ENDPOINT overrides the OpenCode family endpoint."
          100))
 
 (-> configuration-create (&key
-                           (:source-root (option pathname))
-                           (:working-directory (option pathname))
-                           (:model (option string))
-                           (:reasoning-effort (option string))
-                           (:immutable-p boolean)
-                           (:defer-provider-validation-p boolean))
+                             (:source-root (option pathname))
+                             (:working-directory (option pathname))
+                             (:model (option string))
+                             (:reasoning-effort (option string))
+                             (:immutable-p boolean)
+                             (:web-route (member :inference :nous))
+                             (:browser-route (member :disabled :nous))
+                             (:terminal-route (member :local :modal))
+                             (:defer-provider-validation-p boolean))
     configuration)
 (defun configuration-create
     (&key source-root working-directory model reasoning-effort immutable-p
-          defer-provider-validation-p)
+          (web-route ':inference) (browser-route ':disabled)
+          (terminal-route ':local) defer-provider-validation-p)
   "Create runtime configuration from explicit values and the environment.
 
 Provider-specific validation can be deferred until executable user
@@ -517,6 +551,9 @@ initialization registers the selected model."
                    :reasoning-effort selected-effort
                    :immutable-p immutable-p
                    :web-search-mode selected-web-search
+                    :web-route web-route
+                    :browser-route browser-route
+                    :terminal-route terminal-route
                    :context-window (configuration--context-window-for
                                     selected-model)
                    :compaction-threshold-percent
@@ -526,17 +563,23 @@ initialization registers the selected model."
 
 (-> configuration--clone
     (configuration &key (:working-directory (option pathname))
-                   (:model (option string))
-                   (:reasoning-effort (option string))
-                   (:immutable-p boolean)
-                   (:web-search-mode (option string)))
+                        (:model (option string))
+                        (:reasoning-effort (option string))
+                        (:immutable-p boolean)
+                        (:web-search-mode (option string))
+                        (:web-route (member :inference :nous))
+                        (:browser-route (member :disabled :nous))
+                        (:terminal-route (member :local :modal)))
     configuration)
 (defun configuration--clone
     (configuration
      &key working-directory model
        (reasoning-effort nil reasoning-effort-supplied-p)
        (immutable-p nil immutable-p-supplied-p)
-       (web-search-mode nil web-search-mode-supplied-p))
+       (web-search-mode nil web-search-mode-supplied-p)
+       (web-route nil web-route-supplied-p)
+       (browser-route nil browser-route-supplied-p)
+       (terminal-route nil terminal-route-supplied-p))
   "Copy CONFIGURATION, replacing only supplied workspace or model choices.
 
 Selecting a different model recomputes its context window and preserves the old
@@ -575,6 +618,18 @@ reasoning effort only when that effort is supported by the selected model."
                    (if web-search-mode-supplied-p
                        web-search-mode
                        (configuration-web-search-mode configuration))
+                    :web-route
+                    (if web-route-supplied-p
+                        web-route
+                        (configuration-web-route configuration))
+                    :browser-route
+                    (if browser-route-supplied-p
+                        browser-route
+                        (configuration-browser-route configuration))
+                    :terminal-route
+                    (if terminal-route-supplied-p
+                        terminal-route
+                        (configuration-terminal-route configuration))
                    :context-window (if model
                                        (configuration--context-window-for model)
                                        (configuration-context-window
@@ -669,6 +724,43 @@ reasoning effort only when that effort is supported by the selected model."
                             model
                             *supported-models*)))
   (configuration--clone configuration :model model))
+
+(-> configuration-with-web-route
+    (configuration (member :inference :nous))
+    configuration)
+(defun configuration-with-web-route (configuration route)
+  "Copy CONFIGURATION with its session-local web ROUTE changed."
+  (unless (member route *supported-web-routes* :test #'eq)
+    (error 'configuration-error
+           :message (format nil "Unsupported web route ~S." route)))
+  (configuration--clone configuration :web-route route))
+
+(-> configuration-with-browser-route
+    (configuration (member :disabled :nous))
+    configuration)
+(defun configuration-with-browser-route (configuration route)
+  "Copy CONFIGURATION with its session-local browser ROUTE changed."
+  (unless (member route *supported-browser-routes* :test #'eq)
+    (error 'configuration-error
+           :message (format nil "Unsupported browser route ~S." route)))
+  (configuration--clone configuration :browser-route route))
+
+(-> configuration-with-terminal-route
+    (configuration (member :local :modal))
+    configuration)
+(defun configuration-with-terminal-route (configuration route)
+  "Copy CONFIGURATION with its session-local terminal ROUTE changed."
+  (unless (member route *supported-terminal-routes* :test #'eq)
+    (error 'configuration-error
+           :message (format nil "Unsupported terminal route ~S." route)))
+  (configuration--clone configuration :terminal-route route))
+
+(-> configuration-effective-web-route (configuration) keyword)
+(defun configuration-effective-web-route (configuration)
+  "Return CONFIGURATION's concrete web provider route."
+  (if (eq (configuration-web-route configuration) ':inference)
+      (model-family (configuration-model configuration))
+      (configuration-web-route configuration)))
 
 (-> configuration-ensure-directories (configuration) configuration)
 (defun configuration-ensure-directories (configuration)

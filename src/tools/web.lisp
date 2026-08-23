@@ -431,13 +431,17 @@ commit ba42e6866cef4baed7ad92c73e6be8cd42e49d8b."
         (tool-success output)))))
 
 (defmethod tool-execute ((tool web-run-tool) (context tool-context) (arguments hash-table))
-  "Run one provider-compatible web command batch."
+  "Run one web command batch through the session's selected provider route."
   (declare (ignore tool))
   (let* ((configuration (tool-context-configuration context))
-         (provider (provider-create configuration)))
+         (route (configuration-effective-web-route configuration)))
     (when (string= (configuration-web-search-mode configuration) "disabled")
       (error 'tool-error
              :message "Provider web search is disabled by configuration."
              :tool-name "web.run"))
-    (with-credentials (credentials (provider-credential-manager provider))
-      (provider-web-run provider credentials context :commands arguments))))
+    (let ((provider
+            (if (eq route ':nous)
+                (nous-provider-create configuration)
+                (provider-create configuration))))
+      (with-credentials (credentials (provider-credential-manager provider))
+        (provider-web-run provider credentials context :commands arguments)))))

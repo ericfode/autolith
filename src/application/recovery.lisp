@@ -259,17 +259,15 @@
         (error ()
           nil)))))
 
-(-> application--recovery-session-state
-    (configuration)
-    (values (option string) (option integer) (option integer)))
-(defun application--recovery-session-state (configuration)
-  "Return validated per-launch recovery session state for CONFIGURATION."
+(-> application--recovery-session-record (configuration) (option list))
+(defun application--recovery-session-record (configuration)
+  "Return this launcher's validated versioned recovery-session record."
   (block nil
     (handler-case
         (let ((pointer-value
                 (uiop:getenv "AUTOLITH_RECOVERY_SESSION_POINTER")))
           (unless (non-empty-string-p pointer-value)
-            (return (values nil nil nil)))
+            (return nil))
           (let* ((pointer-pathname (pathname pointer-value))
                  (pointer-root
                    (merge-pathnames
@@ -281,60 +279,94 @@
                          (application--bounded-file-p
                           pointer-pathname
                           *application-recovery-pointer-byte-limit*))
-              (return (values nil nil nil)))
+              (return nil))
             (multiple-value-bind (record complete-p)
                 (snapshot-read pointer-pathname)
               (unless (and complete-p
-                           (application-command--proper-list-p record))
-                (return (values nil nil nil)))
+                           (application-command--proper-list-p record)
+                           (eq (first record) ':recovery-session))
+                (return nil))
               (let* ((properties (rest record))
-                     (conversation-id (getf properties :conversation-id))
-                     (resolved-conversation-id
-                       (and
-                        (application--bounded-string-p conversation-id 128)
-                        (conversation-identifier-migration-resolve
-                         configuration conversation-id)))
-                     (rendered-sequence (getf properties :rendered-sequence))
-                     (history-floor-sequence
-                       (getf properties :history-floor-sequence))
+                     (version (getf properties :version))
                      (history-floor-present-p
                        (loop for key in properties by #'cddr
-                             thereis (eq key :history-floor-sequence))))
+                             thereis (eq key ':history-floor-sequence)))
+                     (allowed-keys
+                       (case version
+                         (1
+                          '(:version :conversation-id :rendered-sequence
+                            :history-floor-sequence))
+                         (2
+                          '(:version :conversation-id :rendered-sequence
+                            :history-floor-sequence :web-route :browser-route
+                            :terminal-route)))))
                 (unless
-                    (and (member (length record) '(7 9) :test #'=)
-                         (eq (first record) :recovery-session)
-                         (= (loop for key in properties by #'cddr
-                                  count (eq key :version))
-                            1)
-                         (= (loop for key in properties by #'cddr
-                                  count (eq key :conversation-id))
-                            1)
-                         (= (loop for key in properties by #'cddr
-                                  count (eq key :rendered-sequence))
-                            1)
-                         (<= (loop for key in properties by #'cddr
-                                   count (eq key :history-floor-sequence))
-                             1)
-                         (= (getf properties :version) 1)
-                         (identifier-p
-                          resolved-conversation-id)
-                         (typep rendered-sequence '(integer 0))
-                         (or (not history-floor-present-p)
-                             (null history-floor-sequence)
-                             (typep history-floor-sequence '(integer 1)))
-                         (loop for key in properties by #'cddr
+                    (and allowed-keys
+                         (member (length record)
+                                 (if (= version 1) '(7 9) '(13 15))
+                                 :test #'=)
+                         (loop for key in allowed-keys
+                               for required-p =
+                                 (not (eq key ':history-floor-sequence))
                                always
-                               (member key
-                                       '(:version :conversation-id
-                                         :rendered-sequence
-                                         :history-floor-sequence)
-                                       :test #'eq)))
-                  (return (values nil nil nil)))
-                (values resolved-conversation-id
-                        rendered-sequence
-                        history-floor-sequence)))))
+                               (= (loop for candidate in properties by #'cddr
+                                        count (eq candidate key))
+                                  (if (or required-p history-floor-present-p)
+                                      1
+                                      0)))
+                         (loop for key in properties by #'cddr
+                               always (member key allowed-keys :test #'eq))
+                         (application--bounded-string-p
+                          (getf properties :conversation-id) 128)
+                         (typep (getf properties :rendered-sequence)
+                                '(integer 0))
+                         (or (not history-floor-present-p)
+                             (null (getf properties :history-floor-sequence))
+                             (typep (getf properties :history-floor-sequence)
+                                    '(integer 1)))
+                         (or (= version 1)
+                             (and (member (getf properties :web-route)
+                                          *supported-web-routes* :test #'eq)
+                                  (member (getf properties :browser-route)
+                                          *supported-browser-routes* :test #'eq)
+                                  (member (getf properties :terminal-route)
+                                          *supported-terminal-routes* :test #'eq))))
+                  (return nil))
+                record))))
       (error ()
-        (values nil nil nil)))))
+        nil))))
+
+(-> application--recovery-session-state
+    (configuration)
+    (values (option string) (option integer) (option integer)))
+(defun application--recovery-session-state (configuration)
+  "Return validated per-launch recovery conversation state for CONFIGURATION."
+  (let ((record (application--recovery-session-record configuration)))
+    (if (null record)
+        (values nil nil nil)
+        (let* ((properties (rest record))
+               (conversation-id
+                 (conversation-identifier-migration-resolve
+                  configuration
+                  (getf properties :conversation-id))))
+          (if (identifier-p conversation-id)
+              (values conversation-id
+                      (getf properties :rendered-sequence)
+                      (getf properties :history-floor-sequence))
+              (values nil nil nil))))))
+
+(-> application-recovery-capability-routes
+    (configuration)
+    (values (option keyword) (option keyword) (option keyword)))
+(defun application-recovery-capability-routes (configuration)
+  "Return version-two per-launch capability routes, or NIL values for old records."
+  (let ((record (application--recovery-session-record configuration)))
+    (if (and record (= (getf (rest record) :version) 2))
+        (let ((properties (rest record)))
+          (values (getf properties :web-route)
+                  (getf properties :browser-route)
+                  (getf properties :terminal-route)))
+        (values nil nil nil))))
 
 (-> application-recovery-state
     (configuration)

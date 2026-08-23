@@ -102,6 +102,25 @@
        (configuration--clone configuration :immutable-p t)
        "gpt-5.6-luna"))
      "configuration clones preserve immutable mode")
+      (test-assert
+       (and (eq (configuration-web-route configuration) ':inference)
+            (eq (configuration-browser-route configuration) ':disabled)
+            (eq (configuration-terminal-route configuration) ':local))
+       "capability routes default to inference web, disabled browser, and local terminal")
+      (let ((routed
+              (configuration-with-terminal-route
+               (configuration-with-browser-route
+                (configuration-with-web-route configuration ':nous)
+                ':nous)
+               ':modal)))
+        (test-assert
+         (and (eq (configuration-web-route routed) ':nous)
+              (eq (configuration-browser-route routed) ':nous)
+              (eq (configuration-terminal-route routed) ':modal)
+              (eq (configuration-web-route configuration) ':inference)
+              (eq (configuration-browser-route configuration) ':disabled)
+              (eq (configuration-terminal-route configuration) ':local))
+         "capability route changes clone configuration without mutating the source"))
     (test-assert (string= (configuration-wire-effort configuration) "max")
                  "ultra maps to the provider max effort")
     (test-assert
