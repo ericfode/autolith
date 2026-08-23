@@ -221,6 +221,8 @@
      "Fast indexed workspace path and content discovery through fff.")
     ((string= namespace "shell")
      "External commands run in the workspace.")
+    ((string= namespace "spacemacs")
+     "Scoped operations in opted-in live Spacemacs sessions.")
     ((string= namespace "memory")
      "Persistent facts, preferences, decisions, and guidance across conversations.")
     ((string= namespace "agenda")

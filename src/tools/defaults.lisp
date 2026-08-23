@@ -726,6 +726,18 @@
                            (lambda (tool)
                              (typep tool 'mutable-self-tool))))
 
+(-> default-tools--register-spacemacs (tool-registry) tool-registry)
+(defun default-tools--register-spacemacs (registry)
+  "Register the scoped live Spacemacs command tool in REGISTRY."
+  (default-tools--register
+   registry
+   (list
+    'spacemacs-command-tool
+    "spacemacs" "command"
+    "Perform one authorized scoped operation in an opted-in live Spacemacs session."
+    (spacemacs-tool-parameters)))
+  registry)
+
 (-> make-default-tool-registry (&key (:immutable-p boolean)) tool-registry)
 (defun make-default-tool-registry (&key immutable-p)
   "Create Autolith's tool registry, omitting mutable self tools when requested."
@@ -735,6 +747,7 @@
     (default-tools--register-web registry)
     (default-tools--register-search registry search-worker)
     (default-tools--register-shell registry)
+    (default-tools--register-spacemacs registry)
     (default-tools--register-papercut registry)
     (default-tools--register-agenda registry)
     (default-tools--register-plan registry)

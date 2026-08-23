@@ -1,0 +1,175 @@
+#+TITLE: Autolith layer
+#+TAGS: tools|layer
+
+* Description
+
+This layer connects Spacemacs to running Autolith localgroup sessions. Spacemacs
+can transfer terminal control into an Emacs buffer and send selected source code,
+the current definition, the current buffer, or a plain prompt through Autolith's
+durable input path. An opted-in editor bridge also lets authorized Autolith tools
+perform a closed set of operations in the running Spacemacs session.
+
+The layer uses the built-in Emacs terminal emulator. It does not require vterm,
+eat, gptel, or provider credentials inside Emacs.
+
+** Features
+
+- Discover live Autolith sessions from private localgroup endpoint records.
+- Attach to an existing conversation in a terminal buffer.
+- Take over terminal control or observe a session read-only.
+- Send active regions with source path, line range, major mode, and modification
+  state.
+- Send the definition at point or the complete current buffer.
+- Submit new messages or steering while Autolith is working.
+- Publish a private, process-scoped Emacs server record for editor discovery.
+- Accept authorized status, navigation, editing, saving, and message operations
+  through a fixed JSON dispatcher.
+
+* Install
+
+Add this repository's =contrib/spacemacs/= directory to
+=dotspacemacs-configuration-layer-path= and add =autolith= to
+=dotspacemacs-configuration-layers=:
+
+#+BEGIN_SRC emacs-lisp
+(defun dotspacemacs/layers ()
+  (setq-default
+   dotspacemacs-configuration-layer-path
+   '("/path/to/autolith/contrib/spacemacs/")
+   dotspacemacs-configuration-layers
+   '(autolith)))
+#+END_SRC
+
+When extending an existing configuration, retain its current layer path and
+layer entries.
+
+The =autolith= executable must be available through =exec-path=. Configure an
+explicit pathname when necessary:
+
+#+BEGIN_SRC emacs-lisp
+(autolith :variables
+          autolith-executable "/path/to/autolith")
+#+END_SRC
+
+Reload the Spacemacs configuration after adding the layer.
+
+* Use
+
+Start Autolith normally in the workspace that it should control. Then use
+~SPC a A a~ and select its localgroup session. The default attachment takes
+over terminal control, so the conversation, tool output, selectors, and
+approval prompts move into the Emacs terminal buffer.
+
+Use ~C-u SPC a A a~ for a read-only attachment. Messages sent with the commands
+below still reach the session through =localgroup tell=, but terminal approval
+prompts remain with its controlling terminal.
+
+Inside an attached buffer:
+
+| Key       | Description                         |
+|-----------+-------------------------------------|
+| ~C-c C-d~ | Detach and close the terminal       |
+| ~C-c C-s~ | Send a plain prompt                 |
+| ~C-c C-l~ | List live localgroup sessions       |
+
+* Key bindings
+
+| Key         | Command                   | Description                                  |
+|-------------+---------------------------+----------------------------------------------|
+| ~SPC a A a~ | =autolith-attach=         | Attach to a live session                     |
+| ~SPC a A c~ | =autolith-focus-chat=     | Focus or reopen the last conversation        |
+| ~SPC a A l~ | =autolith-list-sessions=  | Show live sessions                           |
+| ~SPC a A s~ | =autolith-select-session= | Select the default submission target         |
+| ~SPC a A p~ | =autolith-send-prompt=    | Send a plain prompt                          |
+| ~SPC a A r~ | =autolith-send-region=    | Send the active region                       |
+| ~SPC a A d~ | =autolith-send-dwim=      | Send the region or definition at point       |
+| ~SPC a A b~ | =autolith-send-buffer=    | Send the current buffer                      |
+
+A prefix argument on a submission command prompts for the target session.
+Without one, the command uses the current attached session or the most recently
+selected live session.
+
+* Source selection format
+
+Source submissions include a stable text envelope before the selected code:
+
+#+BEGIN_EXAMPLE
+Selected source context from Emacs:
+
+Path: `src/agent/runtime.lisp`
+Lines: 147-173
+Major mode: `lisp-mode`
+Buffer modified: no
+
+```common-lisp
+...
+```
+
+Question:
+Explain this protocol.
+#+END_EXAMPLE
+
+The exact selected text is sent even when the source buffer has unsaved changes.
+The layer never saves a source buffer as a side effect of submission.
+Direct submissions are also limited to 126976 UTF-8 bytes so the message fits
+within portable per-argument process limits.
+
+* Autolith editor control
+
+The layer enables =autolith-editor-bridge-mode= by default. The mode starts or
+reuses this Emacs process's server and publishes a private discovery record at:
+
+#+BEGIN_EXAMPLE
+${XDG_STATE_HOME:-~/.local/state}/autolith/spacemacs/<emacs-pid>.sexp
+#+END_EXAMPLE
+
+The directory is mode =0700= and each record is mode =0600=. The record contains
+only its format version, Emacs PID, server name, and creation time. It is removed
+when the bridge is disabled, Emacs exits, or the watched server process stops.
+Disabling the bridge stops a server that the bridge started; a reused server is
+not owned by the bridge.
+
+Autolith exposes the bridge as =spacemacs.command=. Each call receives ordinary
+external-tool authorization and invokes only
+=(autolith-editor-dispatch-json "BASE64_JSON")= through direct =emacsclient=
+arguments. The protocol does not accept arbitrary Lisp forms, command symbols,
+shell interpolation, or =call-interactively=.
+
+| Operation        | Effect                                                        |
+|------------------+---------------------------------------------------------------|
+| =status=         | Return selected workspace file, point, project, and region state |
+| =visit-file=     | Visit a workspace file and optional line and column             |
+| =focus-buffer=   | Focus an existing buffer visiting a workspace file              |
+| =goto-line=      | Move point in the selected workspace file buffer                 |
+| =insert-text=    | Insert bounded text at point                                     |
+| =replace-region= | Replace or delete the active region with bounded text            |
+| =save-buffer=    | Save the selected workspace file buffer                          |
+| =message=        | Display bounded text from a selected workspace file              |
+
+Every returned editor state is scoped to a selected workspace file after
+resolving symlinks. If one bridge is live, Autolith selects it automatically. If
+several bridges are live, pass the exact =server= name to =spacemacs.command=.
+
+Set =autolith-enable-editor-bridge= to =nil= to keep the Spacemacs-to-Autolith
+commands without publishing editor control. Set =AUTOLITH_EMACSCLIENT= in the
+Autolith process environment when =emacsclient= is not available under that
+name.
+
+* Configuration
+
+| Variable                             | Default          | Description                               |
+|--------------------------------------+------------------+-------------------------------------------|
+| =autolith-executable=                | ="autolith"=     | Autolith executable                       |
+| =autolith-localgroup-directory=      | =nil=             | Override endpoint discovery directory     |
+| =autolith-default-attach-mode=       | =take-over=       | Default attachment ownership              |
+| =autolith-message-character-limit=   | =131072=          | Maximum characters in one submission      |
+| =autolith-chat-buffer-format=        | ="*Autolith %s*"= | Attached terminal buffer name             |
+| =autolith-enable-editor-bridge=      | =t=               | Publish scoped editor control              |
+| =autolith-editor-server-name=        | =nil=             | Reuse or select the Emacs server name      |
+| =autolith-editor-registry-directory= | =nil=             | Override bridge discovery directory        |
+| =autolith-editor-text-limit=         | =131072=          | Maximum text in one editor operation       |
+
+* Compatibility
+
+The layer targets Emacs 29.1 or newer and the Autolith localgroup interface in
+this repository. It has been exercised with Emacs 30.2 on macOS arm64.

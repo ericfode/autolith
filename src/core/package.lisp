@@ -19,6 +19,8 @@
                 #:external-sandbox-policy
                 #:run-sandboxed
                 #:sandbox-result-exit-code
+                #:sandbox-result-error-output
+                #:sandbox-result-error-output-truncated-p
                 #:sandbox-result-output
                 #:sandbox-result-output-truncated-p
                 #:sandbox-result-timed-out-p

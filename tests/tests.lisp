@@ -217,6 +217,7 @@
     (test-papercut-resources)
     (test-tool-registry)
     (test-workspace-tools)
+    (test-spacemacs-tool)
     (test-search-tools)
     (test-lisp-image-manifests)
     (test-system-prompt)
