@@ -30,6 +30,9 @@
 (defparameter *nous-browser-maximum-snapshot-characters* 16000
   "The maximum model-visible browser.snapshot text length.")
 
+(defparameter *nous-browser-maximum-pending-request-interceptions* 256
+  "The most paused browser requests queued for public-URL validation.")
+
 (defparameter *nous-browser-http-request-function* nil
   "Optional test transport replacing managed browser lifecycle HTTP.")
 
@@ -47,7 +50,8 @@
     :initarg :stage
     :reader nous-browser-error-stage
     :type keyword
-    :documentation "The lifecycle, connection, command, action, or response stage.")
+    :documentation
+    "The lifecycle, connection, command, action, request-policy, or response stage.")
    (status
     :initarg :status
     :initform nil
@@ -75,6 +79,20 @@
     :type string
     :documentation "The stale or unknown per-snapshot element reference."))
   (:documentation "A browser action named an element outside the current snapshot."))
+
+(define-condition nous-browser-request-blocked (nous-browser-error)
+  ((url
+    :initarg :url
+    :reader nous-browser-request-blocked-url
+    :type string
+    :documentation "The HTTP(S) request URL rejected by the public URL policy.")
+   (resource-type
+    :initarg :resource-type
+    :initform nil
+    :reader nous-browser-request-blocked-resource-type
+    :type (option string)
+    :documentation "The CDP resource type of the blocked request, when available."))
+  (:documentation "A managed browser request was prevented from reaching a non-public URL."))
 
 (-> nous-browser--fail (keyword string &rest t) null)
 (defun nous-browser--fail (stage control &rest arguments)
@@ -322,6 +340,12 @@
     :accessor browser-cdp-connection-close-reason
     :type (option string)
     :documentation "The bounded transport close reason.")
+   (event-handler
+    :initform nil
+    :accessor browser-cdp-connection-event-handler
+    :type (option function)
+    :documentation
+    "A non-blocking handler called outside the connection lock for each event.")
    (lock
     :initform (make-lock "Autolith browser CDP")
     :reader browser-cdp-connection-lock
@@ -351,7 +375,8 @@
   (when (> (length message) *nous-browser-maximum-cdp-message-bytes*)
     (browser-cdp--close-with-reason connection "CDP message exceeded the size limit.")
     (return-from browser-cdp-handle-message nil))
-  (let ((document (handler-case (json-decode message) (error () nil))))
+  (let ((document (handler-case (json-decode message) (error () nil)))
+        (event-handler nil))
     (unless (json-object-p document)
       (browser-cdp--close-with-reason connection "CDP returned malformed JSON.")
       (return-from browser-cdp-handle-message nil))
@@ -370,9 +395,18 @@
                     (browser-cdp-connection-events connection))
               (when (> (length (browser-cdp-connection-events connection)) 256)
                 (setf (browser-cdp-connection-events connection)
-                      (subseq (browser-cdp-connection-events connection) 0 256)))))
-        (condition-notify (browser-cdp-connection-condition connection)))))
-  nil)
+                      (subseq (browser-cdp-connection-events connection) 0 256)))
+              (setf event-handler
+                    (browser-cdp-connection-event-handler connection))))
+        (condition-notify (browser-cdp-connection-condition connection))))
+    (when event-handler
+      (handler-case
+          (funcall event-handler document)
+        (error (condition)
+          (browser-cdp--close-with-reason
+           connection
+           (format nil "CDP event handler failed: ~A" condition)))))
+  nil))
 
 (-> browser-cdp--actual-connect (browser-cdp-connection string) browser-cdp-transport)
 (defun browser-cdp--actual-connect (connection url)
@@ -591,6 +625,43 @@
     :accessor nous-browser-runtime-state
     :type keyword
     :documentation "The local lifecycle view of the managed browser.")
+   (request-interceptions
+    :initform nil
+    :accessor nous-browser-runtime-request-interceptions
+    :type list
+    :documentation "The FIFO queue of paused HTTP(S) requests awaiting validation.")
+   (active-request-interceptions
+    :initform 0
+    :accessor nous-browser-runtime-active-request-interceptions
+    :type integer
+    :documentation "The number of request interceptions currently being validated.")
+   (request-failure
+    :initform nil
+    :accessor nous-browser-runtime-request-failure
+    :type (option condition)
+    :documentation "The first typed request-policy failure awaiting an action caller.")
+   (request-interception-stopping-p
+    :initform nil
+    :accessor nous-browser-runtime-request-interception-stopping-p
+    :type boolean
+    :documentation "Whether the request interception worker is stopping.")
+   (request-interception-worker
+    :initform nil
+    :accessor nous-browser-runtime-request-interception-worker
+    :documentation "The dedicated request validation worker thread, when started.")
+   (request-interception-lock
+    :initform (make-lock "Autolith browser request interception")
+    :reader nous-browser-runtime-request-interception-lock
+    :documentation "The lock protecting request interception state.")
+   (request-interception-condition
+    :initform (make-condition-variable)
+    :reader nous-browser-runtime-request-interception-condition
+    :documentation "The condition signaled when paused requests are queued.")
+   (request-interception-state-condition
+    :initform (make-condition-variable)
+    :reader nous-browser-runtime-request-interception-state-condition
+    :documentation
+    "The condition signaled when request validation or failure state changes.")
    (lock
     :initform (make-lock "Autolith managed browser")
     :reader nous-browser-runtime-lock
@@ -645,6 +716,232 @@
             (nous-browser-runtime-state runtime) ':created)))
   nil)
 
+
+;;;; -- Request Interception --
+
+(-> nous-browser-runtime--record-request-failure
+    (nous-browser-runtime condition) null)
+(defun nous-browser-runtime--record-request-failure (runtime failure)
+  "Record FAILURE as RUNTIME's first pending request-policy failure."
+  (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+    (unless (nous-browser-runtime-request-failure runtime)
+      (setf (nous-browser-runtime-request-failure runtime) failure))
+    (condition-notify
+     (nous-browser-runtime-request-interception-state-condition runtime)))
+  nil)
+
+(-> nous-browser-runtime--check-request-failure (nous-browser-runtime) null)
+(defun nous-browser-runtime--check-request-failure (runtime)
+  "Signal and consume RUNTIME's first pending request-policy failure."
+  (let ((failure nil))
+    (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+      (setf failure (nous-browser-runtime-request-failure runtime)
+            (nous-browser-runtime-request-failure runtime) nil))
+    (when failure (error failure)))
+  nil)
+
+(-> nous-browser-runtime--enqueue-request
+    (nous-browser-runtime json-object) null)
+(defun nous-browser-runtime--enqueue-request (runtime event)
+  "Queue one Fetch.requestPaused EVENT without blocking the CDP callback."
+  (when (and (string= (or (json-get event "method") "")
+                      "Fetch.requestPaused")
+             (string= (or (json-get event "sessionId") "")
+                      (or (nous-browser-runtime-target-session-id runtime) "")))
+    (let ((overflow-p nil))
+      (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+        (if (>= (length (nous-browser-runtime-request-interceptions runtime))
+                *nous-browser-maximum-pending-request-interceptions*)
+            (setf overflow-p t)
+            (setf (nous-browser-runtime-request-interceptions runtime)
+                  (nconc (nous-browser-runtime-request-interceptions runtime)
+                         (list event))))
+        (condition-notify
+         (nous-browser-runtime-request-interception-condition runtime)))
+      (when overflow-p
+        (nous-browser-runtime--record-request-failure
+         runtime
+         (make-condition
+          'nous-browser-error
+          :message "Managed browser request interception queue exceeded its bound."
+          :tool-name "browser"
+          :stage ':request-policy)))))
+  nil)
+
+(-> nous-browser-runtime--process-request
+    (nous-browser-runtime json-object) null)
+(defun nous-browser-runtime--process-request (runtime event)
+  "Validate and continue or fail one paused HTTP(S) request EVENT."
+  (let* ((parameters (json-get event "params"))
+         (request-id (and (json-object-p parameters)
+                          (json-get parameters "requestId")))
+         (request (and (json-object-p parameters)
+                       (json-get parameters "request")))
+         (url (and (json-object-p request) (json-get request "url")))
+         (resource-type (and (json-object-p parameters)
+                             (json-get parameters "resourceType")))
+         (connection (nous-browser-runtime-connection runtime))
+         (session-id (nous-browser-runtime-target-session-id runtime)))
+    (unless (and (non-empty-string-p request-id)
+                 (non-empty-string-p url)
+                 connection
+                 (non-empty-string-p session-id))
+      (error 'nous-browser-error
+             :message "Managed browser received a malformed paused request event."
+             :tool-name "browser"
+             :stage ':request-policy))
+    (if (nous-web--public-url-p url)
+        (browser-cdp-command
+         connection "Fetch.continueRequest"
+         (json-object "requestId" request-id)
+         :session-id session-id)
+        (let ((failure
+                (make-condition
+                 'nous-browser-request-blocked
+                 :message
+                 (format nil "Managed browser blocked a non-public ~A request to ~A."
+                         (if (non-empty-string-p resource-type)
+                             resource-type
+                             "HTTP(S)")
+                         (bounded-string url :limit 500))
+                 :tool-name "browser"
+                 :stage ':request-policy
+                 :url url
+                 :resource-type
+                 (and (stringp resource-type) resource-type))))
+          (handler-case
+              (browser-cdp-command
+               connection "Fetch.failRequest"
+               (json-object "requestId" request-id
+                            "errorReason" "BlockedByClient")
+               :session-id session-id)
+            (nous-browser-error (condition)
+              (nous-browser-runtime--record-request-failure runtime failure)
+              (error condition)))
+          (nous-browser-runtime--record-request-failure runtime failure))))
+  nil)
+
+(-> nous-browser-runtime--request-worker (nous-browser-runtime) null)
+(defun nous-browser-runtime--request-worker (runtime)
+  "Validate queued requests outside the CDP WebSocket callback thread."
+  (loop
+    (let ((event nil))
+      (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+        (loop while (and (null (nous-browser-runtime-request-interceptions runtime))
+                         (not (nous-browser-runtime-request-interception-stopping-p
+                               runtime)))
+              do (condition-wait
+                  (nous-browser-runtime-request-interception-condition runtime)
+                  (nous-browser-runtime-request-interception-lock runtime)))
+        (when (and (null (nous-browser-runtime-request-interceptions runtime))
+                   (nous-browser-runtime-request-interception-stopping-p runtime))
+          (return))
+        (setf event (pop (nous-browser-runtime-request-interceptions runtime)))
+        (incf (nous-browser-runtime-active-request-interceptions runtime)))
+      (unwind-protect
+           (handler-case
+               (nous-browser-runtime--process-request runtime event)
+             (nous-browser-error (condition)
+               (nous-browser-runtime--record-request-failure runtime condition))
+             (error (condition)
+               (nous-browser-runtime--record-request-failure
+                runtime
+                (make-condition
+                 'nous-browser-error
+                 :message (format nil "Managed browser request interception failed: ~A"
+                                  condition)
+                 :tool-name "browser"
+                 :stage ':request-policy))))
+        (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+          (decf (nous-browser-runtime-active-request-interceptions runtime))
+          (condition-notify
+           (nous-browser-runtime-request-interception-state-condition runtime))))))
+  nil)
+
+(-> nous-browser-runtime--start-request-interception
+    (nous-browser-runtime) null)
+(defun nous-browser-runtime--start-request-interception (runtime)
+  "Start RUNTIME's request worker and non-blocking CDP event callback."
+  (unless (nous-browser-runtime-request-interception-worker runtime)
+    (let ((connection (nous-browser-runtime-connection runtime)))
+      (setf (nous-browser-runtime-request-interception-stopping-p runtime) nil
+            (browser-cdp-connection-event-handler connection)
+            (lambda (event)
+              (nous-browser-runtime--enqueue-request runtime event))
+            (nous-browser-runtime-request-interception-worker runtime)
+            (make-thread
+             (lambda () (nous-browser-runtime--request-worker runtime))
+             :name (format nil "Autolith browser request policy ~A"
+                           (nous-browser-runtime-logical-key runtime))))))
+  nil)
+
+(-> nous-browser-runtime--await-request-interceptions
+    (nous-browser-runtime &key (:timeout real)) null)
+(defun nous-browser-runtime--await-request-interceptions
+    (runtime &key (timeout *nous-browser-command-timeout-seconds*))
+  "Wait boundedly for currently queued request validations and signal failures."
+  (let ((deadline (+ (/ (get-internal-real-time) internal-time-units-per-second)
+                     timeout)))
+    (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+      (loop while (or (nous-browser-runtime-request-interceptions runtime)
+                      (plusp
+                       (nous-browser-runtime-active-request-interceptions runtime)))
+            do (let ((remaining
+                       (- deadline
+                          (/ (get-internal-real-time)
+                             internal-time-units-per-second))))
+                 (when (<= remaining 0)
+                   (error 'nous-browser-error
+                          :message
+                          "Managed browser request validation timed out."
+                          :tool-name "browser"
+                          :stage ':request-policy))
+                 (condition-wait
+                  (nous-browser-runtime-request-interception-state-condition runtime)
+                  (nous-browser-runtime-request-interception-lock runtime)
+                  :timeout remaining)))))
+  (nous-browser-runtime--check-request-failure runtime)
+  nil)
+
+(-> nous-browser-runtime--wait-event-or-request-failure
+    (nous-browser-runtime string integer &key (:timeout real))
+    (option json-object))
+(defun nous-browser-runtime--wait-event-or-request-failure
+    (runtime method after-sequence
+     &key (timeout *nous-browser-action-wait-seconds*))
+  "Wait for METHOD while promptly surfacing blocked browser requests."
+  (let* ((connection (nous-browser-runtime-connection runtime))
+         (deadline (+ (/ (get-internal-real-time) internal-time-units-per-second)
+                      timeout)))
+    (loop
+      (nous-browser-runtime--check-request-failure runtime)
+      (let* ((now (/ (get-internal-real-time) internal-time-units-per-second))
+             (remaining (- deadline now)))
+        (when (<= remaining 0) (return nil))
+        (let ((event
+                (browser-cdp-wait-event
+                 connection method after-sequence
+                 :session-id (nous-browser-runtime-target-session-id runtime)
+                 :timeout (min remaining 0.1))))
+          (when event (return event)))))))
+
+(-> nous-browser-runtime--stop-request-interception
+    (nous-browser-runtime) null)
+(defun nous-browser-runtime--stop-request-interception (runtime)
+  "Stop and join RUNTIME's request validation worker idempotently."
+  (let ((worker (nous-browser-runtime-request-interception-worker runtime))
+        (connection (nous-browser-runtime-connection runtime)))
+    (when connection
+      (setf (browser-cdp-connection-event-handler connection) nil))
+    (when worker
+      (with-lock-held ((nous-browser-runtime-request-interception-lock runtime))
+        (setf (nous-browser-runtime-request-interception-stopping-p runtime) t)
+        (condition-notify
+         (nous-browser-runtime-request-interception-condition runtime)))
+      (join-thread worker)
+      (setf (nous-browser-runtime-request-interception-worker runtime) nil)))
+  nil)
+
 (-> nous-browser-runtime--ensure-page (nous-browser-runtime) null)
 (defun nous-browser-runtime--ensure-page (runtime)
   "Create, connect, and attach RUNTIME to one page target lazily."
@@ -683,6 +980,15 @@
           (nous-browser--fail ':connection "CDP did not attach to the page target."))
         (setf (nous-browser-runtime-target-id runtime) target-id
               (nous-browser-runtime-target-session-id runtime) session-id)
+        (nous-browser-runtime--start-request-interception runtime)
+        (browser-cdp-command
+         connection "Fetch.enable"
+         (json-object
+          "patterns"
+          (vector
+           (json-object "urlPattern" "http://*" "requestStage" "Request")
+           (json-object "urlPattern" "https://*" "requestStage" "Request")))
+         :session-id session-id)
         (dolist (method '("Page.enable" "DOM.enable" "Runtime.enable"
                           "Accessibility.enable"))
           (browser-cdp-command connection method (json-object)
@@ -693,11 +999,16 @@
 (-> nous-browser-runtime-command
     (nous-browser-runtime string json-object) json-object)
 (defun nous-browser-runtime-command (runtime method parameters)
-  "Run one page-session CDP METHOD through RUNTIME."
+  "Run one request-policy-checked page-session CDP METHOD through RUNTIME."
+  (nous-browser-runtime--check-request-failure runtime)
   (nous-browser-runtime--ensure-page runtime)
-  (browser-cdp-command (nous-browser-runtime-connection runtime)
-                       method parameters
-                       :session-id (nous-browser-runtime-target-session-id runtime)))
+  (let ((result
+          (browser-cdp-command
+           (nous-browser-runtime-connection runtime)
+           method parameters
+           :session-id (nous-browser-runtime-target-session-id runtime))))
+    (nous-browser-runtime--await-request-interceptions runtime)
+    result))
 
 (-> nous-browser-runtime--ready-state (nous-browser-runtime) string)
 (defun nous-browser-runtime--ready-state (runtime)
@@ -740,9 +1051,8 @@
       (when (json-get result "errorText")
         (nous-browser--fail ':action "Navigation failed: ~A"
                             (json-get result "errorText")))
-      (browser-cdp-wait-event
-       connection "Page.loadEventFired" sequence
-       :session-id (nous-browser-runtime-target-session-id runtime)
+      (nous-browser-runtime--wait-event-or-request-failure
+       runtime "Page.loadEventFired" sequence
        :timeout *nous-browser-action-wait-seconds*)
       (nous-browser-runtime-wait-ready runtime)
       (clrhash (nous-browser-runtime-references runtime))
@@ -965,7 +1275,9 @@
     (let ((connection (nous-browser-runtime-connection runtime))
           (session-id (nous-browser-runtime-session-id runtime)))
       (when connection
+        (setf (browser-cdp-connection-event-handler connection) nil)
         (browser-cdp-close connection)
+        (nous-browser-runtime--stop-request-interception runtime)
         (setf (nous-browser-runtime-connection runtime) nil))
       (when session-id
         (unwind-protect

@@ -11,7 +11,11 @@
     :accessor test-browser-cdp-transport-messages)
    (closed-p
     :initform nil
-    :accessor test-browser-cdp-transport-closed-p))
+    :accessor test-browser-cdp-transport-closed-p)
+   (request-event-function
+    :initarg :request-event-function
+    :initform nil
+    :reader test-browser-cdp-transport-request-event-function))
   (:documentation "A synchronous mocked CDP transport recording browser commands."))
 
 (-> test-browser--cdp-result (string json-object) json-object)
@@ -63,6 +67,10 @@
       (json-object "id" identifier
                    "result"
                    (test-browser--cdp-result method (json-get document "params")))))
+    (let ((event-function
+            (test-browser-cdp-transport-request-event-function transport)))
+      (when event-function
+        (funcall event-function connection document)))
     (when (string= method "Page.navigate")
       (browser-cdp-handle-message
        connection
@@ -78,6 +86,25 @@
 (defmethod browser-cdp-transport-close ((transport test-browser-cdp-transport))
   "Record closure of mocked TRANSPORT."
   (setf (test-browser-cdp-transport-closed-p transport) t)
+  nil)
+
+(-> test-browser--emit-request-paused
+    (browser-cdp-connection json-object &key (:url string)
+                            (:resource-type string))
+    null)
+(defun test-browser--emit-request-paused
+    (connection command &key url resource-type)
+  "Emit one flattened Fetch.requestPaused event for COMMAND."
+  (browser-cdp-handle-message
+   connection
+   (json-encode
+    (json-object
+     "method" "Fetch.requestPaused"
+     "sessionId" (json-get command "sessionId")
+     "params"
+     (json-object "requestId" (make-identifier)
+                  "request" (json-object "url" url)
+                  "resourceType" resource-type))))
   nil)
 
 (defclass test-browser-delayed-transport (browser-cdp-transport)
@@ -213,15 +240,24 @@
         (let* ((transport
                  (browser-cdp-connection-transport
                   (nous-browser-runtime-connection runtime)))
+               (documents
+                 (reverse
+                  (test-browser-cdp-transport-messages transport)))
                (methods
                  (mapcar (lambda (document) (json-get document "method"))
-                         (test-browser-cdp-transport-messages transport))))
+                         documents)))
           (test-assert
            (every (lambda (method) (member method methods :test #'string=))
-                  '("Page.navigate" "Accessibility.getFullAXTree"
+                  '("Fetch.enable" "Page.navigate" "Accessibility.getFullAXTree"
                     "Input.dispatchMouseEvent" "Input.insertText"
                     "Input.dispatchKeyEvent" "Page.captureScreenshot"))
-           "practical browser actions issue the expected CDP commands")))
+           "practical browser actions issue the expected CDP commands")
+          (test-assert
+           (and (< (position "Fetch.enable" methods :test #'string=)
+                   (position "Page.enable" methods :test #'string=))
+                (< (position "Fetch.enable" methods :test #'string=)
+                   (position "Page.navigate" methods :test #'string=)))
+           "Fetch interception is enabled before the page is used")))
       (handler-case
           (progn
             (nous-browser-runtime-click runtime "stale-ref")
@@ -236,6 +272,142 @@
                     (string= (json-get (fourth request) "action") "stop")))
              requests)
        "managed browser cleanup sends the exact stop PATCH"))
+    (labels ((run-request-policy-case (case)
+               (let* ((transport nil)
+                      (request-emitted-p nil)
+                      (blocked-condition nil)
+                      (*nous-browser-cdp-connect-function*
+                        (lambda (connection url)
+                          (declare (ignore url))
+                          (setf transport
+                                (make-instance
+                                 'test-browser-cdp-transport
+                                 :connection connection
+                                 :request-event-function
+                                 (lambda (connection command)
+                                   (when (and (not request-emitted-p)
+                                              (funcall (getf case :trigger)
+                                                       command))
+                                     (setf request-emitted-p t)
+                                     (test-browser--emit-request-paused
+                                      connection command
+                                      :url (getf case :url)
+                                      :resource-type
+                                      (getf case :resource-type)))))))))
+                 (let ((runtime
+                         (nous-browser-runtime-create
+                          configuration
+                          (format nil "request-policy-~A" (getf case :name)))))
+                   (unwind-protect
+                        (if (getf case :blocked-p)
+                            (handler-case
+                                (progn
+                                  (funcall (getf case :action) runtime)
+                                  (error "Expected browser request blocking for ~A."
+                                         (getf case :name)))
+                              (nous-browser-request-blocked (condition)
+                                (setf blocked-condition condition)))
+                            (funcall (getf case :action) runtime))
+                     (nous-browser-runtime-close runtime)))
+                 (test-assert request-emitted-p
+                              "request policy test emitted its paused request")
+                 (let ((commands
+                         (test-browser-cdp-transport-messages transport)))
+                   (if (getf case :blocked-p)
+                       (test-assert
+                        (and blocked-condition
+                             (string= (nous-browser-request-blocked-url
+                                       blocked-condition)
+                                      (getf case :url))
+                             (string= (or (nous-browser-request-blocked-resource-type
+                                           blocked-condition)
+                                          "")
+                                      (getf case :resource-type))
+                             (some
+                              (lambda (command)
+                                (and (string= (or (json-get command "method") "")
+                                              "Fetch.failRequest")
+                                     (string= (or (json-get
+                                                   (json-get command "params")
+                                                   "errorReason")
+                                                  "")
+                                              "BlockedByClient")))
+                              commands))
+                        (format nil "~A requests are failed with a typed policy condition"
+                                (getf case :name)))
+                       (test-assert
+                        (some
+                         (lambda (command)
+                           (string= (or (json-get command "method") "")
+                                    "Fetch.continueRequest"))
+                         commands)
+                        "public requests continue through Fetch interception"))))))
+      (dolist
+          (case
+           (list
+            (list
+             :name "redirect"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "http://127.0.0.1/redirected"
+             :resource-type "Document"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "clicked-link"
+             :trigger
+             (lambda (command)
+               (and (string= (or (json-get command "method") "")
+                             "Input.dispatchMouseEvent")
+                    (string= (or (json-get (json-get command "params") "type") "")
+                             "mouseReleased")))
+             :url "http://[::1]/clicked"
+             :resource-type "Document"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-snapshot runtime)
+               (nous-browser-runtime-click runtime "e1")))
+            (list
+             :name "history"
+             :trigger
+             (lambda (command)
+               (and (string= (or (json-get command "method") "")
+                             "Runtime.evaluate")
+                    (string= (or (json-get (json-get command "params")
+                                           "expression")
+                                 "")
+                             "history.back()")))
+             :url "http://169.254.169.254/latest/meta-data/"
+             :resource-type "Document"
+             :blocked-p t
+             :action #'nous-browser-runtime-back)
+            (list
+             :name "subresource"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "http://10.0.0.1/private.js"
+             :resource-type "Script"
+             :blocked-p t
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))
+            (list
+             :name "public"
+             :trigger
+             (lambda (command)
+               (string= (or (json-get command "method") "") "Page.navigate"))
+             :url "https://93.184.216.34/resource.js"
+             :resource-type "Script"
+             :blocked-p nil
+             :action
+             (lambda (runtime)
+               (nous-browser-runtime-navigate runtime "https://93.184.216.34/")))))
+        (run-request-policy-case case)))
     (let* ((connection (make-instance 'browser-cdp-connection))
            (transport (make-instance 'test-browser-delayed-transport))
            (left nil)

@@ -52,7 +52,8 @@
               configuration "autolith-test-session"))
            (result
              (terminal-execution-backend-run
-              backend "printf remote" #P"/root/" ':sandboxed 42 65536)))
+              backend "printf remote" #P"/root/" ':sandboxed
+              *managed-modal-maximum-timeout-seconds* 65536)))
       (test-assert (tool-result-success-p result)
                    "managed Modal returns completed remote commands")
       (test-assert (search "exit 7" (tool-result-content result))
@@ -73,7 +74,7 @@
               (= (json-get create-payload "cpu") 1)
               (= (json-get create-payload "memoryMiB") 5120)
               (= (json-get create-payload "timeoutMs") 3600000)
-              (= (json-get create-payload "idleTimeoutMs") 300000)
+              (= (json-get create-payload "idleTimeoutMs") 3600000)
               (eq (json-get create-payload "persistentFilesystem") t)
               (string= (json-get create-payload "logicalKey")
                        "autolith-test-session"))
@@ -81,7 +82,7 @@
         (test-assert
          (and (string= (json-get start-payload "command") "printf remote")
               (string= (json-get start-payload "cwd") "/root/")
-              (= (json-get start-payload "timeoutMs") 42000))
+              (= (json-get start-payload "timeoutMs") 3600000))
          "managed Modal starts execs with command, cwd, and timeout")
         (test-assert
          (and (assoc "Authorization" (third create) :test #'string=)
@@ -110,6 +111,36 @@
             (search "truncated after 5 characters"
                     (tool-result-content bounded)))
        "managed Modal bounds returned command output"))
+    (let ((request-count 0)
+          (backend
+            (terminal-execution-backend-create
+             configuration "overbound-timeout"))
+          (*managed-modal-http-request-function*
+            (lambda (&rest arguments)
+              (declare (ignore arguments))
+              (incf request-count)
+              (error "Overbound timeout must be rejected before transport."))))
+      (handler-case
+          (progn
+            (terminal-execution-backend-run
+             backend "true" #P"/root/" ':sandboxed
+             (1+ *managed-modal-maximum-timeout-seconds*) 100)
+            (error "Expected managed Modal timeout rejection."))
+        (managed-modal-error (condition)
+          (test-assert
+           (and (eq (managed-modal-error-stage condition) ':timeout)
+                (zerop request-count))
+           "managed Modal rejects timeouts above its documented maximum"))))
+    (let* ((backend
+             (terminal-execution-backend-create base "local-overbound-timeout"))
+           (result
+             (terminal-execution-backend-run
+              backend "printf local-timeout" (configuration-working-directory base)
+              ':sandboxed (1+ *managed-modal-maximum-timeout-seconds*) 1000)))
+      (test-assert
+       (and (tool-result-success-p result)
+            (search "local-timeout" (tool-result-content result)))
+       "the managed Modal timeout maximum does not affect local shell execution"))
     (let ((time 0)
           (timeout-requests nil))
       (let ((*managed-modal-time-function*

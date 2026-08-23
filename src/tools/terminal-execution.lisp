@@ -21,6 +21,9 @@
 (defparameter *managed-modal-client-timeout-grace-seconds* 10
   "The client-side grace after the server exec timeout.")
 
+(defparameter *managed-modal-maximum-timeout-seconds* 3600
+  "The largest shell.run timeout accepted by the managed Modal backend.")
+
 (defparameter *managed-modal-maximum-response-bytes* (* 2 1024 1024)
   "The largest managed Modal JSON response accepted by Autolith.")
 
@@ -88,7 +91,8 @@
     :initarg :stage
     :reader managed-modal-error-stage
     :type keyword
-    :documentation "The create, start, poll, cancel, or terminate stage that failed.")
+    :documentation
+    "The authentication, timeout, create, start, poll, cancel, or terminate stage.")
    (status
     :initarg :status
     :initform nil
@@ -392,6 +396,18 @@
            :exec-id exec-id))
   nil)
 
+(-> managed-modal--validate-timeout ((integer 1)) (integer 1))
+(defun managed-modal--validate-timeout (timeout)
+  "Return TIMEOUT when it fits the managed Modal sandbox and exec bound."
+  (when (> timeout *managed-modal-maximum-timeout-seconds*)
+    (error 'managed-modal-error
+           :message
+           (format nil "Managed Modal timeout must not exceed ~D seconds."
+                   *managed-modal-maximum-timeout-seconds*)
+           :tool-name "shell.run"
+           :stage ':timeout))
+  timeout)
+
 (-> managed-modal--ensure-sandbox
     (managed-modal-terminal-execution-backend (integer 1))
     non-empty-string)
@@ -494,88 +510,89 @@
      (output-limit integer))
   "Execute COMMAND in BACKEND's persistent remote sandbox with bounded polling."
   (declare (ignore authorization))
-  (with-lock-held ((managed-modal-terminal-lock backend))
-    (let* ((sandbox-id (managed-modal--ensure-sandbox backend timeout))
-           (exec-id (make-identifier))
-           (cwd (namestring directory))
-           (completed-p nil))
-      (setf (managed-modal-terminal-state backend) ':running)
-      (unwind-protect
-           (multiple-value-bind (body status headers)
-               (managed-modal--request
-                backend :post
-                (format nil "/v1/sandboxes/~A/execs" sandbox-id)
-                :payload (json-object "execId" exec-id
-                                      "command" command
-                                      "cwd" cwd
-                                      "timeoutMs" (* timeout 1000))
-                :connect-timeout 1
-                :read-timeout 10)
-             (declare (ignore headers))
-             (managed-modal--require-success
-              body status ':start sandbox-id exec-id)
-             (let* ((document
-                      (managed-modal--document
-                       body ':start status sandbox-id exec-id))
-                    (remote-status (json-get document "status")))
-               (when (managed-modal--terminal-status-p remote-status)
-                 (setf completed-p t
-                       (managed-modal-terminal-state backend) ':ready)
-                 (return-from terminal-execution-backend-run
-                   (managed-modal--result document output-limit)))
-               (unless (string= (or (json-get document "execId") "") exec-id)
-                 (error 'managed-modal-error
-                        :message
-                        "Managed Modal exec start did not return the expected exec id."
-                        :tool-name "shell.run"
-                        :stage ':start
-                        :status status
-                        :sandbox-id sandbox-id
-                        :exec-id exec-id))
-               (let ((deadline (+ (managed-modal--time)
-                                  timeout
-                                  *managed-modal-client-timeout-grace-seconds*)))
-                 (loop
-                   (when (> (managed-modal--time) deadline)
-                     (managed-modal--cancel backend sandbox-id exec-id)
-                     (setf completed-p t
-                           (managed-modal-terminal-state backend) ':ready)
-                     (return
-                       (tool-failure
-                        (format nil "Managed Modal exec timed out after ~Ds."
-                                timeout))))
-                   (sleep *managed-modal-poll-interval-seconds*)
-                   (multiple-value-bind (poll-body poll-status poll-headers)
-                       (managed-modal--request
-                        backend :get
-                        (format nil "/v1/sandboxes/~A/execs/~A"
-                                sandbox-id exec-id)
-                        :connect-timeout 1
-                        :read-timeout 5)
-                     (declare (ignore poll-headers))
-                     (when (= poll-status 404)
-                       (error 'managed-modal-error
-                              :message "Managed Modal exec was not found."
-                              :tool-name "shell.run"
-                              :stage ':poll
-                              :status poll-status
-                              :sandbox-id sandbox-id
-                              :exec-id exec-id))
-                     (managed-modal--require-success
-                      poll-body poll-status ':poll sandbox-id exec-id)
-                     (let* ((poll-document
-                              (managed-modal--document
-                               poll-body ':poll poll-status sandbox-id exec-id))
-                            (poll-state (json-get poll-document "status")))
-                       (when (managed-modal--terminal-status-p poll-state)
-                         (setf completed-p t
-                               (managed-modal-terminal-state backend) ':ready)
-                         (return
-                           (managed-modal--result
-                            poll-document output-limit)))))))))
-        (unless completed-p
-          (managed-modal--cancel backend sandbox-id exec-id)
-          (setf (managed-modal-terminal-state backend) ':ready))))))
+  (let ((timeout (managed-modal--validate-timeout timeout)))
+    (with-lock-held ((managed-modal-terminal-lock backend))
+      (let* ((sandbox-id (managed-modal--ensure-sandbox backend timeout))
+             (exec-id (make-identifier))
+             (cwd (namestring directory))
+             (completed-p nil))
+        (setf (managed-modal-terminal-state backend) ':running)
+        (unwind-protect
+             (multiple-value-bind (body status headers)
+                 (managed-modal--request
+                  backend :post
+                  (format nil "/v1/sandboxes/~A/execs" sandbox-id)
+                  :payload (json-object "execId" exec-id
+                                        "command" command
+                                        "cwd" cwd
+                                        "timeoutMs" (* timeout 1000))
+                  :connect-timeout 1
+                  :read-timeout 10)
+               (declare (ignore headers))
+               (managed-modal--require-success
+                body status ':start sandbox-id exec-id)
+               (let* ((document
+                        (managed-modal--document
+                         body ':start status sandbox-id exec-id))
+                      (remote-status (json-get document "status")))
+                 (when (managed-modal--terminal-status-p remote-status)
+                   (setf completed-p t
+                         (managed-modal-terminal-state backend) ':ready)
+                   (return-from terminal-execution-backend-run
+                     (managed-modal--result document output-limit)))
+                 (unless (string= (or (json-get document "execId") "") exec-id)
+                   (error 'managed-modal-error
+                          :message
+                          "Managed Modal exec start did not return the expected exec id."
+                          :tool-name "shell.run"
+                          :stage ':start
+                          :status status
+                          :sandbox-id sandbox-id
+                          :exec-id exec-id))
+                 (let ((deadline (+ (managed-modal--time)
+                                    timeout
+                                    *managed-modal-client-timeout-grace-seconds*)))
+                   (loop
+                     (when (> (managed-modal--time) deadline)
+                       (managed-modal--cancel backend sandbox-id exec-id)
+                       (setf completed-p t
+                             (managed-modal-terminal-state backend) ':ready)
+                       (return
+                         (tool-failure
+                          (format nil "Managed Modal exec timed out after ~Ds."
+                                  timeout))))
+                     (sleep *managed-modal-poll-interval-seconds*)
+                     (multiple-value-bind (poll-body poll-status poll-headers)
+                         (managed-modal--request
+                          backend :get
+                          (format nil "/v1/sandboxes/~A/execs/~A"
+                                  sandbox-id exec-id)
+                          :connect-timeout 1
+                          :read-timeout 5)
+                       (declare (ignore poll-headers))
+                       (when (= poll-status 404)
+                         (error 'managed-modal-error
+                                :message "Managed Modal exec was not found."
+                                :tool-name "shell.run"
+                                :stage ':poll
+                                :status poll-status
+                                :sandbox-id sandbox-id
+                                :exec-id exec-id))
+                       (managed-modal--require-success
+                        poll-body poll-status ':poll sandbox-id exec-id)
+                       (let* ((poll-document
+                                (managed-modal--document
+                                 poll-body ':poll poll-status sandbox-id exec-id))
+                              (poll-state (json-get poll-document "status")))
+                         (when (managed-modal--terminal-status-p poll-state)
+                           (setf completed-p t
+                                 (managed-modal-terminal-state backend) ':ready)
+                           (return
+                             (managed-modal--result
+                              poll-document output-limit)))))))))
+          (unless completed-p
+            (managed-modal--cancel backend sandbox-id exec-id)
+            (setf (managed-modal-terminal-state backend) ':ready)))))))
 
 (defmethod terminal-execution-backend-close
     ((backend managed-modal-terminal-execution-backend))
