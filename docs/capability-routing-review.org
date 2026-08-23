@@ -4,7 +4,8 @@
 
 The Nous Tool Gateway behavior was reviewed against the read-only checkout at:
 
-- repository: =/Users/ericfode/src/hermes-agent-reference=
+- repository URL: =https://github.com/NousResearch/hermes-agent.git=
+- local checkout: =/Users/ericfode/src/hermes-agent-reference=
 - inspected commit: =981101239a064c020a9d18fc3b1060ae306934ed=
 
 This checkout is a research input, not an Autolith dependency.
@@ -41,3 +42,35 @@ pointer. Task children inherit the =:modal= route but receive keys from their
 unique task execution identifiers, so concurrent agents do not share sandboxes.
 The status views expose logical identity, local lifecycle state, and live
 sandbox identifier without creating a sandbox.
+
+* Managed browser vertical slice
+
+The browser implementation follows
+=plugins/browser/browser_use/provider.py= from the same inspected commit. It
+creates =POST /browsers= with ={timeout:5, proxyCountryCode:"us"}=,
+=X-Browser-Use-API-Key=, and a retry-stable =X-Idempotency-Key=. The create key
+is retained after transport failures, 5xx responses, and 409 responses whose
+structured error says the request is already in progress. Successful responses
+must contain =id= and a nonempty =cdpUrl= or =connectUrl=. Cleanup sends
+=PATCH /browsers/<id>= with ={action:"stop"}=.
+
+Actions use the returned CDP WebSocket through the locked
+=websocket-driver-client= dependency. The client bounds messages, correlates
+request IDs, retains a bounded event queue, routes flattened target sessions,
+and reports close, protocol, command, and timeout failures without fallback.
+The accessibility snapshot creates refs that are valid only for its generation.
+Navigation validates public HTTP(S) destinations. Screenshots pass through the
+existing private image attachment pipeline.
+
+The =browser= namespace is registered only for =:nous= sessions. Every action
+uses ordinary external-tool authorization under its own canonical identity.
+Typed text is not echoed and uses next-response-only conversation persistence.
+Each agent owns its lazy runtime; permitted task children inherit the route but
+receive unique logical identities and sessions. Agent shutdown stops the
+remote session, while status and info inspect lifecycle and session identity
+without creating one.
+
+Mocked lifecycle and CDP tests cover retry idempotency, headers and payloads,
+correlation, events, practical action commands, schema gating, denial before
+creation, child isolation, cleanup, stale refs, screenshots, status, and message
+bounds.

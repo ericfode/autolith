@@ -305,15 +305,42 @@ configuration.
 
 The equivalent Lisp forms are =(tools)=, =(tools "web" "nous")=,
 =(tools "browser" "nous")=, and =(terminal "modal")=. =/status= and =/info=
-show the effective session selections. For Modal they also show the launcher- or
-task-scoped logical identity, lifecycle state, and live sandbox identifier when
-one exists.
+show the effective selections. They also show the launcher- or task-scoped
+browser and Modal identities, lifecycle states, and live remote identifiers
+without creating either resource.
 
 The default routes are web through the inference provider, browser disabled,
 and the local terminal. Selecting Nous web while Codex is the inference
 provider advertises and executes the managed Firecrawl contract with the
 independent Nous OAuth credential manager. Failures are reported from Nous and
 never fall back to the inference provider.
+
+Selecting =/tools browser nous= advertises the =browser= namespace and creates
+one lazy Browser Use cloud session for that agent. The practical tool set is:
+
+- =browser.navigate=: visit a public absolute HTTP(S) URL.
+- =browser.snapshot=: return a bounded accessibility tree with element refs.
+- =browser.click=, =browser.type=, and =browser.press=: interact with the latest
+  snapshot or focused element.
+- =browser.scroll= and =browser.back=: move within browser history and the page.
+- =browser.screenshot=: return the viewport as a native private image
+  attachment.
+
+Every browser operation passes through the external-tool authorization path
+under its distinct canonical identity. Navigation and mutations can therefore
+be denied independently by ordinary permission policy. Typed text is treated
+as sensitive, is never echoed in results, and its tool call is not retained in
+durable conversation history. Element refs are valid only for the latest
+snapshot and are invalidated after navigation or actions.
+
+The browser lifecycle follows the inspected Nous Browser Use gateway contract:
+create with a five-minute timeout, US proxy, independent Nous OAuth, and a
+retry-stable idempotency key; execute actions through the returned CDP
+WebSocket; stop the session on agent cleanup. Task children receive distinct
+browser identities and sessions only when their tool policy grants =browser.*=.
+Gateway, authentication, CDP, timeout, stale-ref, and bounds failures never
+fall back to another browser. =AUTOLITH_NOUS_BROWSER_GATEWAY_URL= can override
+the default Browser Use gateway with another HTTPS origin.
 
 Selecting =/terminal modal= routes authorized =shell.run= commands to one lazy,
 persistent Nous-managed Modal sandbox for that agent. The sandbox uses the Nous
@@ -332,9 +359,6 @@ timeout, and cancellation failures are reported without local fallback.
 The optional =AUTOLITH_NOUS_MODAL_GATEWAY_URL= override must name an HTTPS
 origin. The default container image follows the inspected Hermes managed Modal
 configuration: =nikolaik/python-nodejs:python3.11-nodejs20=.
-
-Browser selection remains session configuration pending its separate complete
-CDP runtime slice.
 
 ** Commands
 
