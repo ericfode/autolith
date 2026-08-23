@@ -7633,7 +7633,7 @@
                       (list
                        'configuration-create
                        (lambda (&key source-root working-directory model
-                                    reasoning-effort immutable-p
+                                    reasoning-effort codex-fast-mode-p immutable-p
                                     defer-provider-validation-p)
                          (declare (ignore source-root
                                     defer-provider-validation-p))
@@ -7642,6 +7642,7 @@
                           :working-directory working-directory
                           :model model
                           :reasoning-effort reasoning-effort
+                          :codex-fast-mode-p codex-fast-mode-p
                           :immutable-p immutable-p)))
                       (list
                        'application-terminal-ui-create
