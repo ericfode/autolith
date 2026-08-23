@@ -18,6 +18,12 @@
     :reader preference-state-reasoning-effort
     :type (option non-empty-string)
     :documentation "The last interactively selected reasoning effort, if any.")
+    (codex-fast-mode-p
+     :initarg :codex-fast-mode-p
+     :initform nil
+     :reader preference-state-codex-fast-mode-p
+     :type boolean
+     :documentation "Whether Codex Fast mode is enabled for future requests.")
    (reasoning-traces-p
     :initarg :reasoning-traces-p
     :initform nil
@@ -68,44 +74,48 @@
                     (1
                      t)
                     ((2 3)
-                       (let ((model (getf properties :model))
-                             (effort (getf properties :reasoning-effort))
-                             (compact-present-p
-                               (readable-state-property-present-p
-                                properties :compact-view-p))
-                             (turn-timestamps-present-p
-                               (readable-state-property-present-p
-                                properties :turn-timestamps-p))
-                             (simple-technical-english-present-p
-                               (readable-state-property-present-p
-                                properties :simple-technical-english-p))
-                             (permission-mode (getf properties :permission-mode))
-                             (permission-mode-present-p
-                               (readable-state-property-present-p
-                                properties :permission-mode)))
-                         (and
-                          (readable-state-property-present-p properties :model)
-                          (readable-state-property-present-p
-                           properties :reasoning-effort)
-                          (or (null model) (non-empty-string-p model))
-                          ;; Model-specific effort names may come from
-                          ;; executable user initialization. Validate them when
-                          ;; applying preferences to the active model.
-                          (or (null effort)
-                              (non-empty-string-p effort))
-                          (or (not compact-present-p)
-                              (typep (getf properties :compact-view-p)
-                                     'boolean))
-                          (or (not turn-timestamps-present-p)
-                              (typep (getf properties :turn-timestamps-p)
-                                     'boolean))
-                          (or (not simple-technical-english-present-p)
-                              (typep
-                               (getf properties :simple-technical-english-p)
-                               'boolean))
-                            (or (not permission-mode-present-p)
-                                (member permission-mode '(nil :ask :auto) :test #'eq))
-                          (or (= version 2) compact-present-p))))
+                     (let ((model (getf properties :model))
+                           (effort (getf properties :reasoning-effort))
+                           (compact-present-p
+                             (readable-state-property-present-p
+                              properties :compact-view-p))
+                           (turn-timestamps-present-p
+                             (readable-state-property-present-p
+                              properties :turn-timestamps-p))
+                           (simple-technical-english-present-p
+                             (readable-state-property-present-p
+                              properties :simple-technical-english-p))
+                           (codex-fast-mode-present-p
+                             (readable-state-property-present-p
+                              properties :codex-fast-mode-p))
+                           (permission-mode (getf properties :permission-mode))
+                           (permission-mode-present-p
+                             (readable-state-property-present-p
+                              properties :permission-mode)))
+                       (and
+                        (readable-state-property-present-p properties :model)
+                        (readable-state-property-present-p
+                         properties :reasoning-effort)
+                        (or (null model) (non-empty-string-p model))
+                        ;; Model-specific effort names may come from executable
+                        ;; user initialization. Validate them when applying
+                        ;; preferences to the active model.
+                        (or (null effort)
+                            (non-empty-string-p effort))
+                        (or (not compact-present-p)
+                            (typep (getf properties :compact-view-p) 'boolean))
+                        (or (not turn-timestamps-present-p)
+                            (typep (getf properties :turn-timestamps-p) 'boolean))
+                        (or (not simple-technical-english-present-p)
+                            (typep
+                             (getf properties :simple-technical-english-p)
+                             'boolean))
+                        (or (not codex-fast-mode-present-p)
+                            (typep (getf properties :codex-fast-mode-p)
+                                   'boolean))
+                        (or (not permission-mode-present-p)
+                            (member permission-mode '(nil :ask :auto) :test #'eq))
+                        (or (= version 2) compact-present-p))))
                     (otherwise
                      nil)))))
     (error ()
@@ -115,37 +125,41 @@
 (defun preferences--form->state (form)
   "Return the validated preference state represented by FORM."
   (let ((properties (rest form)))
-      (make-instance 'preference-state
-                     :model (getf properties :model)
-                     :reasoning-effort (getf properties :reasoning-effort)
-                     :reasoning-traces-p
-                     (getf properties :reasoning-traces-p)
-                     :compact-view-p (getf properties :compact-view-p t)
-                     :turn-timestamps-p
-                     (getf properties :turn-timestamps-p nil)
-                     :simple-technical-english-p
-                     (getf properties :simple-technical-english-p nil)
-                     :permission-mode
-                     (getf properties :permission-mode))))
+    (make-instance 'preference-state
+                   :model (getf properties :model)
+                   :reasoning-effort (getf properties :reasoning-effort)
+                   :codex-fast-mode-p
+                   (getf properties :codex-fast-mode-p nil)
+                   :reasoning-traces-p
+                   (getf properties :reasoning-traces-p)
+                   :compact-view-p (getf properties :compact-view-p t)
+                   :turn-timestamps-p
+                   (getf properties :turn-timestamps-p nil)
+                   :simple-technical-english-p
+                   (getf properties :simple-technical-english-p nil)
+                   :permission-mode
+                   (getf properties :permission-mode))))
 
-  (-> preferences--state-form (preference-state) list)
-  (defun preferences--state-form (preferences)
-    "Return the backward-compatible durable record for PREFERENCES."
-    (list :preferences
-          :version *preferences-version*
-          :model (preference-state-model preferences)
-          :reasoning-effort
-          (preference-state-reasoning-effort preferences)
-          :reasoning-traces-p
-          (preference-state-reasoning-traces-p preferences)
-          :compact-view-p
-          (preference-state-compact-view-p preferences)
-          :turn-timestamps-p
-          (preference-state-turn-timestamps-p preferences)
-          :simple-technical-english-p
-          (preference-state-simple-technical-english-p preferences)
-          :permission-mode
-          (preference-state-permission-mode preferences)))
+(-> preferences--state-form (preference-state) list)
+(defun preferences--state-form (preferences)
+  "Return the durable record for PREFERENCES."
+  (list :preferences
+        :version *preferences-version*
+        :model (preference-state-model preferences)
+        :reasoning-effort
+        (preference-state-reasoning-effort preferences)
+        :codex-fast-mode-p
+        (preference-state-codex-fast-mode-p preferences)
+        :reasoning-traces-p
+        (preference-state-reasoning-traces-p preferences)
+        :compact-view-p
+        (preference-state-compact-view-p preferences)
+        :turn-timestamps-p
+        (preference-state-turn-timestamps-p preferences)
+        :simple-technical-english-p
+        (preference-state-simple-technical-english-p preferences)
+        :permission-mode
+        (preference-state-permission-mode preferences)))
 
 (-> preferences--read
     (configuration)
@@ -204,6 +218,11 @@
   "Return the persisted reasoning-summary setting, defaulting safely to false."
   (preference-state-reasoning-traces-p (preferences-load configuration)))
 
+(-> preferences-codex-fast-mode-p (configuration) boolean)
+(defun preferences-codex-fast-mode-p (configuration)
+  "Return the persisted Codex Fast mode setting, defaulting safely to false."
+  (preference-state-codex-fast-mode-p (preferences-load configuration)))
+
 (-> preferences-compact-view-p (configuration) boolean)
 (defun preferences-compact-view-p (configuration)
   "Return the persisted compact tool-presentation setting, defaulting to true."
@@ -227,7 +246,7 @@
 
 (-> preferences-apply-model-selection (configuration) configuration)
 (defun preferences-apply-model-selection (configuration)
-  "Apply saved model and reasoning-effort choices when they remain valid.
+  "Apply saved model, effort, and Codex Fast mode choices when they remain valid.
 
 A saved model that no effective provider registration serves is dropped rather
 than applied, so removing a provider cannot leave the configuration naming a
@@ -235,6 +254,8 @@ model no provider can serve."
   (let* ((preferences (preferences-load configuration))
          (saved-model (preference-state-model preferences))
          (saved-effort (preference-state-reasoning-effort preferences))
+         (saved-codex-fast-mode-p
+           (preference-state-codex-fast-mode-p preferences))
          (selected configuration))
     (when (and saved-model
                (not (non-empty-string-p (uiop:getenv "AUTOLITH_MODEL")))
@@ -249,6 +270,11 @@ model no provider can serve."
                        :test #'string=))
       (setf selected
             (configuration-with-reasoning-effort selected saved-effort)))
+    (unless (non-empty-string-p (uiop:getenv "AUTOLITH_CODEX_FAST_MODE"))
+      (setf selected
+            (configuration-with-codex-fast-mode
+             selected
+             saved-codex-fast-mode-p)))
     selected))
 
 (-> preferences--write (configuration preference-state) null)
@@ -274,6 +300,7 @@ model no provider can serve."
      &key
      (:model (option non-empty-string))
      (:reasoning-effort (option non-empty-string))
+     (:codex-fast-mode-p boolean)
      (:reasoning-traces-p boolean)
      (:compact-view-p boolean)
      (:turn-timestamps-p boolean)
@@ -283,6 +310,8 @@ model no provider can serve."
 (defun preferences--copy
     (previous &key (model (preference-state-model previous))
                    (reasoning-effort (preference-state-reasoning-effort previous))
+                   (codex-fast-mode-p
+                    (preference-state-codex-fast-mode-p previous))
                    (reasoning-traces-p
                     (preference-state-reasoning-traces-p previous))
                    (compact-view-p (preference-state-compact-view-p previous))
@@ -295,6 +324,7 @@ model no provider can serve."
   (make-instance 'preference-state
                  :model model
                  :reasoning-effort reasoning-effort
+                 :codex-fast-mode-p codex-fast-mode-p
                  :reasoning-traces-p reasoning-traces-p
                  :compact-view-p compact-view-p
                  :turn-timestamps-p turn-timestamps-p
@@ -310,6 +340,15 @@ model no provider can serve."
     (preferences-load configuration)
     :model (configuration-model configuration)
     :reasoning-effort (configuration-reasoning-effort configuration)))
+  nil)
+
+(-> preferences-set-codex-fast-mode (configuration boolean) null)
+(defun preferences-set-codex-fast-mode (configuration enabled-p)
+  "Atomically persist Codex Fast mode without discarding other global choices."
+  (preferences--write
+   configuration
+   (preferences--copy (preferences-load configuration)
+                      :codex-fast-mode-p enabled-p))
   nil)
 
 (-> preferences-set-reasoning-traces (configuration boolean) null)
