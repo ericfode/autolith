@@ -541,10 +541,10 @@ model's effort choice to CONFIGURATION--CLONE."
         (completed-p nil))
     (unwind-protect
          (progn
-           (setf registry
-                 (make-default-tool-registry
-                  :immutable-p
-                  (configuration-immutable-p configuration)))
+          (setf registry
+                (make-default-tool-registry
+                 :immutable-p (configuration-immutable-p configuration)
+                 :configuration configuration))
            (setf registry
                  (task-augment-tool-registry registry))
            (multiple-value-bind (augmented manager)
@@ -719,9 +719,12 @@ model's effort choice to CONFIGURATION--CLONE."
                          :conversation (application-conversation application)
                          :tool-registry new-registry
                          :worker (application-worker application)
-                         :terminal-logical-key
-                         (agent-terminal-logical-key old-agent)
-                         :terminal-backend (agent-terminal-backend old-agent))
+                       :terminal-logical-key
+                       (agent-terminal-logical-key old-agent)
+                       :terminal-backend (agent-terminal-backend old-agent)
+                       :browser-logical-key
+                       (agent-browser-logical-key old-agent)
+                       :browser-runtime (agent-browser-runtime-state old-agent))
                         retirement-started-p t
                         failure-stage ':retire)
                  (application-disconnect-task-presentation application)
@@ -1179,10 +1182,14 @@ newly acquired lease."
                                    :conversation conversation
                                    :tool-registry registry
                                    :worker worker
-                                   :terminal-logical-key
-                                   (agent-terminal-logical-key previous-agent)
-                                   :terminal-backend
-                                   (agent-terminal-backend previous-agent)))
+                                 :terminal-logical-key
+                                 (agent-terminal-logical-key previous-agent)
+                                 :terminal-backend
+                                 (agent-terminal-backend previous-agent)
+                                 :browser-logical-key
+                                 (agent-browser-logical-key previous-agent)
+                                 :browser-runtime
+                                 (agent-browser-runtime-state previous-agent)))
                    (ui (application-terminal-ui-create)))
              (setf new-application
                    (make-instance
@@ -1319,8 +1326,17 @@ newly acquired lease."
   "Switch APPLICATION to CONFIGURATION and optionally CONVERSATION."
   (let* ((active-conversation (or conversation
                                   (application-conversation application)))
+         (previous-configuration (application-configuration application))
          (previous-provider (application-provider application))
          (previous-agent (application-agent application))
+         (previous-registry (application-tool-registry application))
+         (browser-route-changed-p
+           (not (eq (configuration-browser-route previous-configuration)
+                    (configuration-browser-route configuration))))
+         (registry
+           (if browser-route-changed-p
+               (application--create-tool-registry configuration)
+               previous-registry))
          (provider
            (if previous-provider
                (provider-with-configuration previous-provider configuration)
@@ -1328,19 +1344,27 @@ newly acquired lease."
          (agent (agent-create :configuration configuration
                               :provider provider
                               :conversation active-conversation
-                              :tool-registry (application-tool-registry
-                                              application)
+                              :tool-registry registry
                               :worker (application-worker application)
                               :terminal-logical-key
                               (agent-terminal-logical-key previous-agent)
                               :terminal-backend
-                              (agent-terminal-backend previous-agent))))
+                              (agent-terminal-backend previous-agent)
+                              :browser-logical-key
+                              (agent-browser-logical-key previous-agent)
+                              :browser-runtime
+                              (agent-browser-runtime-state previous-agent))))
     (agent-terminal-execution-backend agent)
     (setf (application-configuration application) configuration
           (application-conversation application) active-conversation
           (application-provider application) provider
-          (application-agent application) agent))
+          (application-tool-registry application) registry
+          (application-agent application) agent)
     (application-publish-recovery-session application)
+    (when (eq (configuration-browser-route configuration) ':disabled)
+      (agent-close-browser-runtime agent))
+    (when browser-route-changed-p
+      (tool-registry-close-runtime-state previous-registry)))
   nil)
 
 (-> application--agent-adopt-runtime (application agent) null)
@@ -1393,7 +1417,11 @@ command replaced the active conversation."
                       :terminal-logical-key
                       (agent-terminal-logical-key previous-agent)
                       :terminal-backend
-                      (agent-terminal-backend previous-agent))))
+                      (agent-terminal-backend previous-agent)
+                      :browser-logical-key
+                      (agent-browser-logical-key previous-agent)
+                      :browser-runtime
+                      (agent-browser-runtime-state previous-agent))))
              (setf completed-p t)
              (values provider registry agent)))
       (unless completed-p

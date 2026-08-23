@@ -229,6 +229,7 @@
     (test-nous-provider)
     (test-nous-web)
     (test-managed-modal-terminal)
+    (test-nous-managed-browser)
     (test-fireworks-provider)
     (test-opencode-provider)
     (test-resource-protocol)

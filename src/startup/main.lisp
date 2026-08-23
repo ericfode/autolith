@@ -326,9 +326,9 @@
                (ignore-errors (localgroup-stop application))
                  (when (and (slot-boundp application 'agent)
                             (application-agent application))
-                   (ignore-errors
-                     (agent-close-terminal-execution-backend
-                      (application-agent application))))
+                  (ignore-errors
+                    (agent-close-external-runtimes
+                     (application-agent application))))
                (unless tool-runtimes-closed-p
                  (unwind-protect
                       (ignore-errors

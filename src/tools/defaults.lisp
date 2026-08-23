@@ -726,13 +726,18 @@
                            (lambda (tool)
                              (typep tool 'mutable-self-tool))))
 
-(-> make-default-tool-registry (&key (:immutable-p boolean)) tool-registry)
-(defun make-default-tool-registry (&key immutable-p)
-  "Create Autolith's tool registry, omitting mutable self tools when requested."
+(-> make-default-tool-registry
+    (&key (:immutable-p boolean) (:configuration (option configuration)))
+    tool-registry)
+(defun make-default-tool-registry (&key immutable-p configuration)
+  "Create Autolith's route-aware tool registry, omitting mutable self tools when requested."
   (let ((registry (make-instance 'tool-registry))
         (search-worker (search-worker-create)))
     (default-tools--register-workspace registry)
     (default-tools--register-web registry)
+    (when (and configuration
+               (eq (configuration-browser-route configuration) ':nous))
+      (browser-tools-register registry))
     (default-tools--register-search registry search-worker)
     (default-tools--register-shell registry)
     (default-tools--register-papercut registry)

@@ -289,6 +289,26 @@
              (application--field-spans "modal sandbox" sandbox-id))))
         nil)))
 
+(-> application--browser-runtime-fields (application) list)
+(defun application--browser-runtime-fields (application)
+  "Return managed browser lifecycle rows without creating a browser session."
+  (let* ((configuration (application-configuration application))
+         (agent (and (slot-boundp application 'agent)
+                     (application-agent application))))
+    (when (eq (configuration-browser-route configuration) ':nous)
+      (let* ((runtime (and agent (agent-browser-runtime-state agent)))
+             (status (nous-browser-runtime-status runtime))
+             (state (getf status :state))
+             (session-id (getf status :session-id)))
+        (append
+         (application--field-spans
+          "browser state" (string-downcase (symbol-name state)))
+         (application--field-spans
+          "browser identity"
+          (if agent (agent-browser-logical-key agent) "unavailable"))
+        (when session-id
+          (application--field-spans "browser session" session-id)))))))
+
 (-> application-info-entry (application) list)
 (defun application-info-entry (application)
   "Return APPLICATION's read-only model and runtime settings display."
@@ -314,6 +334,7 @@
                                  (symbol-name
                                   (configuration-terminal-route configuration))))
        (application--terminal-backend-fields application)
+      (application--browser-runtime-fields application)
      (application--field-spans
       "trace"
       (application--toggle-state
@@ -385,6 +406,7 @@
                                  (symbol-name
                                   (configuration-terminal-route configuration))))
        (application--terminal-backend-fields application)
+      (application--browser-runtime-fields application)
      (application--field-spans "goal"
                                (let ((goal (application-goal application)))
                                  (if goal

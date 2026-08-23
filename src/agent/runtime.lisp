@@ -116,6 +116,18 @@
     :accessor agent-terminal-backend
     :type (option terminal-execution-backend)
     :documentation "The lazily selected terminal backend owned by this agent.")
+   (browser-logical-key
+    :initarg :browser-logical-key
+    :initform (format nil "autolith-browser-~A" (make-identifier))
+    :reader agent-browser-logical-key
+    :type non-empty-string
+    :documentation "The unique managed browser identity for this agent.")
+   (browser-runtime
+    :initarg :browser-runtime
+    :initform nil
+    :accessor agent-browser-runtime-state
+    :type (option nous-browser-runtime)
+    :documentation "The lazily created managed browser session owned by this agent.")
    (turn-lock
     :initform (make-lock "Autolith agent turn")
     :reader agent-turn-lock
@@ -350,11 +362,13 @@
      (:tool-registry (option tool-registry))
      (:worker t)
      (:terminal-logical-key (option non-empty-string))
-     (:terminal-backend (option terminal-execution-backend)))
+     (:terminal-backend (option terminal-execution-backend))
+     (:browser-logical-key (option non-empty-string))
+     (:browser-runtime (option nous-browser-runtime)))
     agent)
 (defun agent-create
     (&key configuration provider conversation tool-registry worker
-          terminal-logical-key terminal-backend)
+          terminal-logical-key terminal-backend browser-logical-key browser-runtime)
   "Create an agent, filling unspecified provider, conversation, registry, and worker roles."
   (unless (typep configuration 'configuration)
     (error 'configuration-error
@@ -365,12 +379,17 @@
                  :conversation (or conversation
                                    (conversation-create configuration))
                  :tool-registry (or tool-registry
-                                    (make-default-tool-registry))
+                                    (make-default-tool-registry
+                                     :configuration configuration))
                  :worker (or worker (lisp-worker-pool-create configuration))
                  :terminal-logical-key
                  (or terminal-logical-key
                      (format nil "autolith-agent-~A" (make-identifier)))
-                 :terminal-backend terminal-backend))
+                 :terminal-backend terminal-backend
+                 :browser-logical-key
+                 (or browser-logical-key
+                     (format nil "autolith-browser-~A" (make-identifier)))
+                 :browser-runtime browser-runtime))
 
 (-> agent-terminal-execution-backend (agent) terminal-execution-backend)
 (defun agent-terminal-execution-backend (agent)
@@ -396,6 +415,35 @@
       (unwind-protect
            (terminal-execution-backend-close backend)
         (setf (agent-terminal-backend agent) nil))))
+  nil)
+
+(-> agent-browser-runtime (agent) nous-browser-runtime)
+(defun agent-browser-runtime (agent)
+  "Return AGENT's lazy Nous browser runtime without cross-agent sharing."
+  (unless (eq (configuration-browser-route (agent-configuration agent)) ':nous)
+    (nous-browser--fail ':configuration "Browser automation is disabled for this session."))
+  (or (agent-browser-runtime-state agent)
+      (setf (agent-browser-runtime-state agent)
+            (nous-browser-runtime-create
+             (agent-configuration agent)
+             (agent-browser-logical-key agent)))))
+
+(-> agent-close-browser-runtime (agent) null)
+(defun agent-close-browser-runtime (agent)
+  "Close AGENT's managed browser runtime without creating one."
+  (let ((runtime (agent-browser-runtime-state agent)))
+    (when runtime
+      (unwind-protect
+           (nous-browser-runtime-close runtime)
+        (setf (agent-browser-runtime-state agent) nil))))
+  nil)
+
+(-> agent-close-external-runtimes (agent) null)
+(defun agent-close-external-runtimes (agent)
+  "Close AGENT's browser and terminal runtimes, attempting both."
+  (unwind-protect
+       (agent-close-browser-runtime agent)
+    (agent-close-terminal-execution-backend agent))
   nil)
 
 (-> agent-run-user-turn
