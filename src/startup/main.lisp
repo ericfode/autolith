@@ -324,6 +324,11 @@
     (labels ((close-runtime-resources ()
                "Close APPLICATION's external runtimes at most once."
                (ignore-errors (localgroup-stop application))
+                 (when (and (slot-boundp application 'agent)
+                            (application-agent application))
+                   (ignore-errors
+                     (agent-close-terminal-execution-backend
+                      (application-agent application))))
                (unless tool-runtimes-closed-p
                  (unwind-protect
                       (ignore-errors

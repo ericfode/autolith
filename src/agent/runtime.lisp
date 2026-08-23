@@ -104,6 +104,18 @@
     :accessor agent-hurry-up-p
     :type boolean
     :documentation "Whether provider requests use the urgent execution profile.")
+   (terminal-logical-key
+    :initarg :terminal-logical-key
+    :initform (format nil "autolith-agent-~A" (make-identifier))
+    :reader agent-terminal-logical-key
+    :type non-empty-string
+    :documentation "The persistent terminal filesystem identity for this agent.")
+   (terminal-backend
+    :initarg :terminal-backend
+    :initform nil
+    :accessor agent-terminal-backend
+    :type (option terminal-execution-backend)
+    :documentation "The lazily selected terminal backend owned by this agent.")
    (turn-lock
     :initform (make-lock "Autolith agent turn")
     :reader agent-turn-lock
@@ -336,15 +348,13 @@
      (:provider (option model-provider))
      (:conversation (option conversation))
      (:tool-registry (option tool-registry))
-     (:worker t))
+     (:worker t)
+     (:terminal-logical-key (option non-empty-string))
+     (:terminal-backend (option terminal-execution-backend)))
     agent)
 (defun agent-create
-    (&key
-       configuration
-       provider
-       conversation
-       tool-registry
-       worker)
+    (&key configuration provider conversation tool-registry worker
+          terminal-logical-key terminal-backend)
   "Create an agent, filling unspecified provider, conversation, registry, and worker roles."
   (unless (typep configuration 'configuration)
     (error 'configuration-error
@@ -356,7 +366,37 @@
                                    (conversation-create configuration))
                  :tool-registry (or tool-registry
                                     (make-default-tool-registry))
-                 :worker (or worker (lisp-worker-pool-create configuration))))
+                 :worker (or worker (lisp-worker-pool-create configuration))
+                 :terminal-logical-key
+                 (or terminal-logical-key
+                     (format nil "autolith-agent-~A" (make-identifier)))
+                 :terminal-backend terminal-backend))
+
+(-> agent-terminal-execution-backend (agent) terminal-execution-backend)
+(defun agent-terminal-execution-backend (agent)
+  "Return AGENT's selected terminal backend, replacing stale route state."
+  (let* ((route (configuration-terminal-route (agent-configuration agent)))
+         (backend (agent-terminal-backend agent)))
+    (when (and backend
+               (not (eq route (terminal-execution-backend-route backend))))
+      (terminal-execution-backend-close backend)
+      (setf (agent-terminal-backend agent) nil
+            backend nil))
+    (or backend
+        (setf (agent-terminal-backend agent)
+              (terminal-execution-backend-create
+               (agent-configuration agent)
+               (agent-terminal-logical-key agent))))))
+
+(-> agent-close-terminal-execution-backend (agent) null)
+(defun agent-close-terminal-execution-backend (agent)
+  "Close AGENT's terminal backend without creating one."
+  (let ((backend (agent-terminal-backend agent)))
+    (when backend
+      (unwind-protect
+           (terminal-execution-backend-close backend)
+        (setf (agent-terminal-backend agent) nil))))
+  nil)
 
 (-> agent-run-user-turn
     (agent (or string user-message-input)
@@ -736,6 +776,8 @@
                     :conversation (agent-conversation agent)
                     :registry (agent-tool-registry agent)
                     :agent agent
+                     :terminal-backend
+                     (agent-terminal-execution-backend agent)
                     :observer observer
                     :call-id call-id
                     :command-authorization-function

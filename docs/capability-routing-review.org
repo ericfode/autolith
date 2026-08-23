@@ -21,7 +21,23 @@ changes both the provider-visible =web.run= schema and execution credentials to
 Nous managed Firecrawl while inference can remain Codex. The default
 =:inference= route retains prior behavior. There is no silent fallback.
 
-Browser and Modal runtime adapters are deliberately outside this slice. Their
-route values are serialized now so later stateful implementations can use the
-same per-launcher configuration boundary without migrating a global
-preference.
+* Managed Modal vertical slice
+
+The Modal implementation follows =tools/environments/managed_modal.py= and
+=modal_utils.py= from the inspected checkout. It uses bearer-plus-JSON requests
+to the dedicated Modal gateway, creates one lazy persistent sandbox per agent,
+starts execs, polls terminal states, cancels timed-out or interrupted execs, and
+terminates with =snapshotBeforeTerminate=true=. The client adds no file API
+because the inspected contract has none.
+
+=shell.run= performs the existing command permission decision before dispatching
+to the selected explicit local or managed Modal backend. Modal never falls back
+to local execution. It forwards no process environment, host credentials,
+secrets, or workspace files. Absolute command directories under the Modal route
+are remote paths.
+
+Each launcher derives an opaque stable logical key from its private recovery
+pointer. Task children inherit the =:modal= route but receive keys from their
+unique task execution identifiers, so concurrent agents do not share sandboxes.
+The status views expose logical identity, local lifecycle state, and live
+sandbox identifier without creating a sandbox.

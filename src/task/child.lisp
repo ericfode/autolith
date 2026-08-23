@@ -575,6 +575,9 @@ boundary cannot fit within that budget."
           (make-instance 'task-child-agent :configuration configuration
                          :provider provider :conversation conversation
                          :tool-registry registry :worker worker
+                           :terminal-logical-key
+                           (format nil "autolith-task-~A"
+                                   (task-job-execution-identifier job))
                          :definition definition
                          :identity (task-job-identity job) :depth depth
                          :completion completion :orchestrator orchestrator :job
@@ -613,4 +616,5 @@ boundary cannot fit within that budget."
                     :goal-context (task-child-goal-context job configuration))))
              (task--assemble-child-result
               job result child conversation completion)))
+      (ignore-errors (agent-close-terminal-execution-backend child))
       (ignore-errors (lisp-worker-pool-stop-all worker)))))

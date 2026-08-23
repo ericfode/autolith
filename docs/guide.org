@@ -305,7 +305,9 @@ configuration.
 
 The equivalent Lisp forms are =(tools)=, =(tools "web" "nous")=,
 =(tools "browser" "nous")=, and =(terminal "modal")=. =/status= and =/info=
-show the effective session selections.
+show the effective session selections. For Modal they also show the launcher- or
+task-scoped logical identity, lifecycle state, and live sandbox identifier when
+one exists.
 
 The default routes are web through the inference provider, browser disabled,
 and the local terminal. Selecting Nous web while Codex is the inference
@@ -313,9 +315,26 @@ provider advertises and executes the managed Firecrawl contract with the
 independent Nous OAuth credential manager. Failures are reported from Nous and
 never fall back to the inference provider.
 
-Browser and Modal selections are session configuration in this release. Their
-runtime implementations are separate later slices; this release does not add
-browser tools or redirect local shell execution.
+Selecting =/terminal modal= routes authorized =shell.run= commands to one lazy,
+persistent Nous-managed Modal sandbox for that agent. The sandbox uses the Nous
+OAuth account independently of inference, starts in =/root= with one CPU, 5120
+MiB of memory, and bounded command and idle timeouts. Task children inherit the
+route but receive distinct logical identities and sandboxes. Launcher recovery
+reuses an opaque identity derived from that launcher's recovery pointer so the
+persistent filesystem can reconnect after recovery.
+
+Modal execution does not upload the local workspace, copy environment
+variables, mount credential files, or forward secrets. An explicit absolute
+=directory= is interpreted as a remote path; the default is =/root=. Command
+approval occurs before backend dispatch. Gateway, entitlement, authentication,
+timeout, and cancellation failures are reported without local fallback.
+
+The optional =AUTOLITH_NOUS_MODAL_GATEWAY_URL= override must name an HTTPS
+origin. The default container image follows the inspected Hermes managed Modal
+configuration: =nikolaik/python-nodejs:python3.11-nodejs20=.
+
+Browser selection remains session configuration pending its separate complete
+CDP runtime slice.
 
 ** Commands
 

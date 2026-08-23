@@ -232,6 +232,24 @@
              (uiop:subpathp pathname root)
              pathname)))))
 
+(-> application--terminal-logical-key (configuration) non-empty-string)
+(defun application--terminal-logical-key (configuration)
+  "Return a stable opaque terminal identity for this launcher."
+  (let ((pointer (application--recovery-session-pointer configuration)))
+    (if pointer
+        (let ((digest
+                (string-downcase
+                 (with-output-to-string (stream)
+                   (loop for octet across
+                         (digest-sequence
+                          ':sha256
+                          (sb-ext:string-to-octets
+                           (namestring pointer)
+                           :external-format ':utf-8))
+                         do (format stream "~2,'0X" octet))))))
+          (format nil "autolith-launcher-~A" (subseq digest 0 32)))
+        (format nil "autolith-launcher-~A" (make-identifier)))))
+
 (-> application-publish-recovery-session (application) null)
 (defun application-publish-recovery-session (application)
   "Best-effort publish the active durable conversation for hard-crash recovery."
@@ -694,15 +712,18 @@ model's effort choice to CONFIGURATION--CLONE."
                         (application-reasoning-traces-p application))
                        new-registry
                        (application--create-tool-registry configuration))
-                 (setf new-agent
-                       (agent-create
-                        :configuration configuration
-                        :provider new-provider
-                        :conversation (application-conversation application)
-                        :tool-registry new-registry
-                        :worker (application-worker application))
-                       retirement-started-p t
-                       failure-stage ':retire)
+                  (setf new-agent
+                        (agent-create
+                         :configuration configuration
+                         :provider new-provider
+                         :conversation (application-conversation application)
+                         :tool-registry new-registry
+                         :worker (application-worker application)
+                         :terminal-logical-key
+                         (agent-terminal-logical-key old-agent)
+                         :terminal-backend (agent-terminal-backend old-agent))
+                        retirement-started-p t
+                        failure-stage ':retire)
                  (application-disconnect-task-presentation application)
                  (setf presentation-disconnected-p t)
                  (multiple-value-bind (completed retirement-failure)
@@ -941,14 +962,16 @@ newly acquired lease."
                             (application--create-tool-registry configuration)
                             worker
                             (lisp-worker-pool-create configuration))
-                      (let* ((agent
-                               (agent-create
-                                :configuration configuration
-                                :provider provider
-                                :conversation conversation
-                                :tool-registry registry
-                                :worker worker))
-                             (ui (application-terminal-ui-create)))
+                       (let* ((agent
+                                (agent-create
+                                 :configuration configuration
+                                 :provider provider
+                                 :conversation conversation
+                                 :tool-registry registry
+                                 :worker worker
+                                 :terminal-logical-key
+                                 (application--terminal-logical-key configuration)))
+                              (ui (application-terminal-ui-create)))
                         (setf application
                               (make-instance
                                'application
@@ -1149,13 +1172,18 @@ newly acquired lease."
                      recovery-conversation-id)))))
            (setf worker (lisp-worker-pool-create configuration)
                  registry (application--create-tool-registry configuration))
-           (let* ((agent
-                    (agent-create :configuration configuration
-                                  :provider provider
-                                  :conversation conversation
-                                  :tool-registry registry
-                                  :worker worker))
-                  (ui (application-terminal-ui-create)))
+            (let* ((previous-agent (application-agent application))
+                   (agent
+                     (agent-create :configuration configuration
+                                   :provider provider
+                                   :conversation conversation
+                                   :tool-registry registry
+                                   :worker worker
+                                   :terminal-logical-key
+                                   (agent-terminal-logical-key previous-agent)
+                                   :terminal-backend
+                                   (agent-terminal-backend previous-agent)))
+                   (ui (application-terminal-ui-create)))
              (setf new-application
                    (make-instance
                     'application
@@ -1292,6 +1320,7 @@ newly acquired lease."
   (let* ((active-conversation (or conversation
                                   (application-conversation application)))
          (previous-provider (application-provider application))
+         (previous-agent (application-agent application))
          (provider
            (if previous-provider
                (provider-with-configuration previous-provider configuration)
@@ -1301,7 +1330,12 @@ newly acquired lease."
                               :conversation active-conversation
                               :tool-registry (application-tool-registry
                                               application)
-                              :worker (application-worker application))))
+                              :worker (application-worker application)
+                              :terminal-logical-key
+                              (agent-terminal-logical-key previous-agent)
+                              :terminal-backend
+                              (agent-terminal-backend previous-agent))))
+    (agent-terminal-execution-backend agent)
     (setf (application-configuration application) configuration
           (application-conversation application) active-conversation
           (application-provider application) provider
@@ -1348,13 +1382,18 @@ command replaced the active conversation."
                       (provider-create configuration))))
            (setf registry
                  (application--create-tool-registry configuration))
-           (let ((agent
-                   (agent-create
-                    :configuration configuration
-                    :provider provider
-                    :conversation conversation
-                    :tool-registry registry
-                    :worker (application-worker application))))
+            (let* ((previous-agent (application-agent application))
+                   (agent
+                     (agent-create
+                      :configuration configuration
+                      :provider provider
+                      :conversation conversation
+                      :tool-registry registry
+                      :worker (application-worker application)
+                      :terminal-logical-key
+                      (agent-terminal-logical-key previous-agent)
+                      :terminal-backend
+                      (agent-terminal-backend previous-agent))))
              (setf completed-p t)
              (values provider registry agent)))
       (unless completed-p

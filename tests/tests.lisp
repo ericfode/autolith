@@ -228,6 +228,7 @@
     (test-anthropic-provider)
     (test-nous-provider)
     (test-nous-web)
+    (test-managed-modal-terminal)
     (test-fireworks-provider)
     (test-opencode-provider)
     (test-resource-protocol)

@@ -304,6 +304,12 @@
     :reader tool-context-agent
     :type t
     :documentation "The agent whose provider call requested this tool.")
+    (terminal-backend
+     :initarg :terminal-backend
+     :initform nil
+     :reader tool-context-terminal-backend
+     :type (option terminal-execution-backend)
+     :documentation "The agent-scoped terminal destination for shell.run.")
    (observer
     :initarg :observer
     :initform nil

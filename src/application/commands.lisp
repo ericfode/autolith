@@ -267,6 +267,28 @@
   "Return the compact user-facing state for ENABLED-P."
   (if enabled-p "on" "off"))
 
+(-> application--terminal-backend-fields (application) list)
+(defun application--terminal-backend-fields (application)
+  "Return status rows for the selected terminal backend without creating it."
+  (let* ((agent (and (slot-boundp application 'agent)
+                     (application-agent application)))
+         (backend (and agent (agent-terminal-backend agent)))
+         (route (configuration-terminal-route
+                 (application-configuration application))))
+    (if (eq route ':modal)
+        (let* ((status (terminal-execution-backend-status backend))
+               (state (getf status :state))
+               (sandbox-id (getf status :sandbox-id)))
+          (append
+           (application--field-spans
+            "modal state" (string-downcase (symbol-name state)))
+           (application--field-spans
+            "modal identity"
+            (if agent (agent-terminal-logical-key agent) "unavailable"))
+           (when sandbox-id
+             (application--field-spans "modal sandbox" sandbox-id))))
+        nil)))
+
 (-> application-info-entry (application) list)
 (defun application-info-entry (application)
   "Return APPLICATION's read-only model and runtime settings display."
@@ -291,6 +313,7 @@
                                 (string-downcase
                                  (symbol-name
                                   (configuration-terminal-route configuration))))
+       (application--terminal-backend-fields application)
      (application--field-spans
       "trace"
       (application--toggle-state
@@ -361,6 +384,7 @@
                                 (string-downcase
                                  (symbol-name
                                   (configuration-terminal-route configuration))))
+       (application--terminal-backend-fields application)
      (application--field-spans "goal"
                                (let ((goal (application-goal application)))
                                  (if goal
