@@ -131,6 +131,18 @@
                 (test-assert
                  (not (getf (rest form) :codex-fast-mode-p))
                  "normalizing preferences adds disabled Codex Fast mode")))
+            (snapshot-write
+             pathname
+             '(:preferences
+               :version 2
+               :model "gpt-5.6-sol"
+               :reasoning-effort "ultra"
+               :reasoning-traces-p nil
+               :compact-view-p t))
+            (let ((version-two (preferences-load configuration)))
+              (test-assert
+               (not (preference-state-codex-fast-mode-p version-two))
+               "version two preferences without Fast mode default it to disabled"))
            (with-open-file (stream pathname
                                    :direction ':output
                                    :if-exists ':supersede
