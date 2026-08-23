@@ -2795,13 +2795,15 @@ sandbox grant is revalidated at this final authorization boundary."
     (tool json-object)
     string)
 (defun application--tool-authorization-request-entry (tool arguments)
-  "Render TOOL identity and complete ARGUMENTS for one approval request."
-  (with-output-to-string (stream)
-    (format stream "External tool approval requested.~%")
-    (dolist (field (tool-authorization-identity-fields tool))
-      (destructuring-bind (label value) field
-        (format stream "  ~A  ~S~%" label value)))
-    (format stream "  arguments  ~A" (json-encode arguments))))
+  "Render TOOL identity and presentation-safe ARGUMENTS for one approval request."
+  (let ((presentation
+          (tool-authorization-presentation-arguments tool arguments)))
+    (with-output-to-string (stream)
+      (format stream "External tool approval requested.~%")
+      (dolist (field (tool-authorization-identity-fields tool))
+        (destructuring-bind (label value) field
+          (format stream "  ~A  ~S~%" label value)))
+      (format stream "  arguments  ~A" (json-encode presentation)))))
 
 (-> application--tool-authorization-items () list)
 (defun application--tool-authorization-items ()

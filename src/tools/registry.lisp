@@ -165,6 +165,16 @@
   "Identify an ordinary TOOL by its canonical Autolith name."
   (list (list "tool" (tool-canonical-name tool))))
 
+(-> tool-authorization-presentation-arguments (tool json-object) json-object)
+(defgeneric tool-authorization-presentation-arguments (tool arguments)
+  (:documentation
+   "Return TOOL ARGUMENTS with sensitive values removed for permission presentation."))
+
+(defmethod tool-authorization-presentation-arguments ((tool tool) arguments)
+  "Present ordinary TOOL ARGUMENTS without transformation."
+  (declare (ignore tool))
+  arguments)
+
 (-> tool-object-schema (json-object list) json-object)
 (defun tool-object-schema (properties required)
   "Return a closed JSON object schema with PROPERTIES and REQUIRED names."

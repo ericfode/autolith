@@ -40,6 +40,21 @@
   (declare (ignore tool))
   ':next-response)
 
+(defmethod tool-authorization-presentation-arguments
+    ((tool browser-type-tool) arguments)
+  "Remove typed text from permission presentation while retaining its length."
+  (declare (ignore tool))
+  (let ((presentation (json-object)))
+    (maphash
+     (lambda (name value)
+       (unless (string= name "text")
+         (setf (gethash name presentation) value)))
+     arguments)
+    (let ((text (json-get arguments "text")))
+      (setf (gethash "text_length" presentation)
+            (if (stringp text) (length text) 0)))
+    presentation))
+
 (-> browser-tool--authorized-p (browser-tool tool-context json-object) boolean)
 (defun browser-tool--authorized-p (tool context arguments)
   "Return true when CONTEXT authorizes external browser TOOL ARGUMENTS."

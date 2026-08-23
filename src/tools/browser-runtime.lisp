@@ -363,7 +363,8 @@
     (setf (browser-cdp-connection-closed-p connection) t
           (browser-cdp-connection-close-reason connection)
           (bounded-string reason))
-    (condition-notify (browser-cdp-connection-condition connection)))
+    (sb-thread:condition-broadcast
+     (browser-cdp-connection-condition connection)))
   nil)
 
 (-> browser-cdp-handle-message (browser-cdp-connection t) null)
@@ -398,7 +399,8 @@
                       (subseq (browser-cdp-connection-events connection) 0 256)))
               (setf event-handler
                     (browser-cdp-connection-event-handler connection))))
-        (condition-notify (browser-cdp-connection-condition connection))))
+        (sb-thread:condition-broadcast
+         (browser-cdp-connection-condition connection))))
     (when event-handler
       (handler-case
           (funcall event-handler document)

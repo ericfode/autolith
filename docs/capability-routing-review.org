@@ -70,6 +70,17 @@ receive unique logical identities and sessions. Agent shutdown stops the
 remote session, while status and info inspect lifecycle and session identity
 without creating one.
 
+* Managed browser network trust boundary
+
+Autolith retains literal-address, hostname, local-DNS, redirect, and
+subresource checks through CDP Fetch interception. These checks are defense in
+depth, not an end-to-end SSRF boundary. The remote Browser Use environment can
+resolve a hostname differently from the local Autolith host, while the
+inspected managed gateway contract exposes no destination-pinning or
+network-policy endpoint. Same-network enforcement is therefore a Browser
+Use/Nous gateway trust requirement. Autolith cannot claim an SSRF boundary
+across differing local and remote DNS views.
+
 Mocked lifecycle and CDP tests cover retry idempotency, headers and payloads,
 correlation, events, practical action commands, schema gating, denial before
 creation, child isolation, cleanup, stale refs, screenshots, status, and message

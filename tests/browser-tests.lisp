@@ -447,6 +447,61 @@
         (test-assert
          (and (string= left "left-result") (string= right "right-result"))
          "CDP request IDs correlate out-of-order concurrent responses")))
+      (let* ((connection (make-instance 'browser-cdp-connection))
+             (transport (make-instance 'test-browser-delayed-transport))
+             (runtime (nous-browser-runtime-create configuration "close-broadcast"))
+             (left-stage nil)
+             (right-stage nil))
+        (setf (browser-cdp-connection-transport connection) transport
+              (nous-browser-runtime-connection runtime) connection
+              (nous-browser-runtime-target-session-id runtime) "cdp-session-1")
+        (nous-browser-runtime--start-request-interception runtime)
+        (let ((left-thread
+                (make-thread
+                 (lambda ()
+                   (handler-case
+                       (browser-cdp-command
+                        connection "Test.wait-left" (json-object) :timeout 2)
+                     (nous-browser-error (condition)
+                       (setf left-stage (nous-browser-error-stage condition)))))))
+              (right-thread
+                (make-thread
+                 (lambda ()
+                   (handler-case
+                       (browser-cdp-command
+                        connection "Test.wait-right" (json-object) :timeout 2)
+                     (nous-browser-error (condition)
+                       (setf right-stage (nous-browser-error-stage condition))))))))
+          (unwind-protect
+               (progn
+                 (test-browser--wait-message-count transport 2)
+                 (browser-cdp-handle-message
+                  connection
+                  (json-encode
+                   (json-object
+                    "method" "Fetch.requestPaused"
+                    "sessionId" "cdp-session-1"
+                    "params"
+                    (json-object
+                     "requestId" "close-request"
+                     "request" (json-object "url" "https://93.184.216.34/")
+                     "resourceType" "Document"))))
+                 (test-browser--wait-message-count transport 3)
+                 (browser-cdp-close connection)
+                 (join-thread left-thread)
+                 (join-thread right-thread)
+                 (nous-browser-runtime--stop-request-interception runtime)
+                 (let ((request-failure
+                         (nous-browser-runtime-request-failure runtime)))
+                   (test-assert
+                    (and (eq left-stage ':connection)
+                         (eq right-stage ':connection)
+                         (typep request-failure 'nous-browser-error)
+                         (eq (nous-browser-error-stage request-failure) ':connection))
+                    "CDP close wakes concurrent commands and the active Fetch worker")))
+            (ignore-errors (browser-cdp-close connection))
+            (ignore-errors
+              (nous-browser-runtime--stop-request-interception runtime)))))
     (let ((connection (make-instance 'browser-cdp-connection)))
       (browser-cdp-handle-message
        connection
@@ -460,6 +515,24 @@
        (and (null (tool-registry-find disabled "browser" "navigate"))
             (tool-registry-find enabled "browser" "navigate"))
        "browser schemas are advertised only for enabled sessions"))
+      (let* ((registry (make-default-tool-registry :configuration configuration))
+             (tool (tool-registry-find registry "browser" "type"))
+             (arguments (json-object "ref" "e2" "text" "permission-secret"))
+             (presentation
+               (tool-authorization-presentation-arguments tool arguments))
+             (entry
+               (application--tool-authorization-request-entry tool arguments)))
+        (multiple-value-bind (text text-present-p) (gethash "text" presentation)
+          (declare (ignore text))
+          (test-assert
+           (and (not text-present-p)
+                (string= (json-get presentation "ref") "e2")
+                (= (json-get presentation "text_length") 17)
+                (string= (json-get arguments "text") "permission-secret")
+                (null (search "permission-secret" entry))
+                (search "text_length" entry)
+                (search "e2" entry))
+           "browser.type approval presentation redacts text without changing execution arguments")))
     (let* ((agent (agent-create :configuration configuration
                                 :browser-logical-key "permission-browser"))
            (conversation (conversation-create configuration
