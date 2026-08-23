@@ -3,20 +3,24 @@
 
 * Description
 
-This layer connects Spacemacs to running Autolith localgroup sessions. Spacemacs
-can transfer terminal control into an Emacs buffer and send selected source code,
-the current definition, the current buffer, or a plain prompt through Autolith's
-durable input path. An opted-in editor bridge also lets authorized Autolith tools
-perform a closed set of operations in the running Spacemacs session.
+This layer launches new interactive Autolith inferers and connects Spacemacs to
+running localgroup sessions. Spacemacs can transfer terminal control into an
+Emacs buffer, browse retained terminal history, and send selected source code,
+the current definition, the current buffer, or a plain prompt through
+Autolith's durable input path. An opted-in editor bridge also lets authorized
+Autolith tools perform a closed set of operations in the running Spacemacs
+session.
 
 The layer uses the built-in Emacs terminal emulator. It does not require vterm,
 eat, gptel, or provider credentials inside Emacs.
 
 ** Features
 
+- Launch a new interactive Autolith inferer in the current project.
 - Discover live Autolith sessions from private localgroup endpoint records.
 - Attach to an existing conversation in a terminal buffer.
 - Take over terminal control or observe a session read-only.
+- Preserve and browse the retained terminal replay after attachment.
 - Send active regions with source path, line range, major mode, and modification
   state.
 - Send the definition at point or the complete current buffer.
@@ -58,31 +62,40 @@ index.
 
 * Use
 
-Start Autolith normally in the workspace that it should control. Then use
-~SPC a A a~ and select its localgroup session. The default attachment takes
-over terminal control, so the conversation, tool output, selectors, and
-approval prompts move into the Emacs terminal buffer.
+Use ~SPC a A n~ to start a new interactive Autolith inferer. It starts in the
+current project root, or =default-directory= outside a project. Add a prefix
+argument to choose another workspace directory.
+
+Use ~SPC a A a~ to select and attach to an existing localgroup session. The
+default attachment takes over terminal control, so the conversation, retained
+terminal replay, tool output, selectors, and approval prompts move into the
+Emacs terminal buffer.
 
 Use ~C-u SPC a A a~ for a read-only attachment. Messages sent with the commands
 below still reach the session through =localgroup tell=, but terminal approval
 prompts remain with its controlling terminal.
 
-Inside an attached buffer:
+Inside an Autolith terminal buffer:
 
-| Key       | Description                         |
-|-----------+-------------------------------------|
-| ~C-c C-d~ | Detach and close the terminal       |
-| ~C-c C-s~ | Send a plain prompt                 |
-| ~C-c C-l~ | List live localgroup sessions       |
+| Key       | Description                                      |
+|-----------+--------------------------------------------------|
+| ~C-c C-h~ | Browse the oldest retained terminal output       |
+| ~C-c C-e~ | Return to the live prompt in character mode      |
+| ~C-c C-d~ | Detach, or stop a directly launched inferer      |
+| ~C-c C-s~ | Send a plain prompt                              |
+| ~C-c C-l~ | List live localgroup sessions                    |
 
 * Key bindings
 
 | Key         | Command                   | Description                                  |
 |-------------+---------------------------+----------------------------------------------|
+| ~SPC a A n~ | =autolith-start=          | Start a new interactive inferer              |
 | ~SPC a A a~ | =autolith-attach=         | Attach to a live session                     |
 | ~SPC a A c~ | =autolith-focus-chat=     | Focus or reopen the last conversation        |
 | ~SPC a A l~ | =autolith-list-sessions=  | Show live sessions                           |
 | ~SPC a A s~ | =autolith-select-session= | Select the default submission target         |
+| ~SPC a A h~ | =autolith-show-history=   | Browse retained terminal history             |
+| ~SPC a A e~ | =autolith-jump-to-live=   | Return to the live terminal prompt           |
 | ~SPC a A p~ | =autolith-send-prompt=    | Send a plain prompt                          |
 | ~SPC a A r~ | =autolith-send-region=    | Send the active region                       |
 | ~SPC a A d~ | =autolith-send-dwim=      | Send the region or definition at point       |
@@ -167,6 +180,8 @@ name.
 | =autolith-default-attach-mode=       | =take-over=       | Default attachment ownership              |
 | =autolith-message-character-limit=   | =131072=          | Maximum characters in one submission      |
 | =autolith-chat-buffer-format=        | ="*Autolith %s*"= | Attached terminal buffer name             |
+| =autolith-terminal-scrollback-lines= | =1048576=        | Maximum terminal scrollback lines         |
+| =autolith-session-discovery-timeout= | =60=             | New-session endpoint discovery timeout    |
 | =autolith-enable-editor-bridge=      | =t=               | Publish scoped editor control              |
 | =autolith-editor-server-name=        | =nil=             | Reuse or select the Emacs server name      |
 | =autolith-editor-registry-directory= | =nil=             | Override bridge discovery directory        |

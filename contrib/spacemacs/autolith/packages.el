@@ -10,10 +10,13 @@
   "Initialize the local Autolith Emacs package."
   (use-package autolith
     :demand t
-    :commands (autolith-attach
+    :commands (autolith-start
+               autolith-attach
                autolith-focus-chat
                autolith-list-sessions
                autolith-select-session
+               autolith-show-history
+               autolith-jump-to-live
                autolith-send-prompt
                autolith-send-region
                autolith-send-dwim
@@ -21,10 +24,13 @@
     :init
     (spacemacs/declare-prefix "aA" "autolith")
     (spacemacs/set-leader-keys
+      "aAn" 'autolith-start
       "aAa" 'autolith-attach
       "aAc" 'autolith-focus-chat
       "aAl" 'autolith-list-sessions
       "aAs" 'autolith-select-session
+      "aAh" 'autolith-show-history
+      "aAe" 'autolith-jump-to-live
       "aAp" 'autolith-send-prompt
       "aAr" 'autolith-send-region
       "aAd" 'autolith-send-dwim

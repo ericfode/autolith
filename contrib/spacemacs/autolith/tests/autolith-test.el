@@ -129,6 +129,204 @@
       (remhash session-id autolith--chat-buffers)
       (kill-buffer buffer))))
 
+(ert-deftest autolith-test-pid-descendant-walks-parent-chain ()
+  (cl-letf (((symbol-function 'process-attributes)
+             (lambda (pid)
+               (pcase pid
+                 (30 '((ppid . 20)))
+                 (20 '((ppid . 10)))
+                 (10 '((ppid . 1)))
+                 (40 '((ppid . 40)))
+                 (_ nil)))))
+    (should (autolith--pid-descendant-p 30 10))
+    (should (autolith--pid-descendant-p 10 10))
+    (should-not (autolith--pid-descendant-p 30 11))
+    (should-not (autolith--pid-descendant-p 40 10))))
+
+(ert-deftest autolith-test-session-record-matches-launched-descendant ()
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+            ((symbol-function 'process-id) (lambda (_process) 10))
+            ((symbol-function 'autolith--session-records)
+             (lambda ()
+               '((:session-id "other12" :pid 99 :created-at 2)
+                 (:session-id "Ab3dE9x" :pid 30 :created-at 1))))
+            ((symbol-function 'process-attributes)
+             (lambda (pid)
+               (pcase pid
+                 (30 '((ppid . 20)))
+                 (20 '((ppid . 10)))
+                 (_ nil)))))
+    (should
+     (equal "Ab3dE9x"
+            (plist-get (autolith--session-record-for-process 'launcher)
+                       :session-id)))))
+
+(ert-deftest autolith-test-term-start-preserves-configured-scrollback ()
+  (let* ((directory (make-temp-file "autolith-start-directory-" t))
+         (autolith-terminal-scrollback-lines 12345)
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (setq buffer
+                (autolith--make-term
+                 "*Autolith scrollback test*" "/bin/cat" nil directory))
+          (with-current-buffer buffer
+            (should (= 12345 term-buffer-maximum-size))
+            (should (equal (file-name-as-directory directory)
+                           default-directory))))
+      (when (buffer-live-p buffer)
+        (when-let ((process (get-buffer-process buffer)))
+          (delete-process process))
+        (kill-buffer buffer))
+      (delete-directory directory t))))
+
+(ert-deftest autolith-test-start-launches-top-level-and-discovers-session ()
+  (let* ((directory (make-temp-file "autolith-start-directory-" t))
+         (session-id "Ab3dE9x")
+         (autolith-executable "/bin/cat")
+         (autolith-chat-buffer-format "*Autolith start test %s*")
+         (autolith-session-discovery-timeout 0)
+         (autolith-last-session-id nil)
+         (autolith-last-chat-buffer nil)
+         (buffer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'autolith--session-record-for-process)
+                   (lambda (_process)
+                     `(:session-id ,session-id :pid 123 :created-at 1)))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (target &rest _arguments) target)))
+          (setq buffer (autolith-start directory))
+          (let* ((process (get-buffer-process buffer))
+                 (command (process-command process)))
+            (should (process-live-p process))
+            (should (equal "/bin/cat" (car (last command))))
+            (should-not (member "localgroup" command)))
+          (with-current-buffer buffer
+            (should (eq 'direct autolith-attachment-mode))
+            (should (equal session-id autolith-session-id))
+            (should (equal (file-name-as-directory (file-truename directory))
+                           default-directory))
+            (should (= autolith-terminal-scrollback-lines
+                       term-buffer-maximum-size)))
+          (should (eq buffer (gethash session-id autolith--chat-buffers)))
+          (should (eq buffer autolith-last-chat-buffer))
+          (should (equal session-id autolith-last-session-id)))
+      (remhash session-id autolith--chat-buffers)
+      (when (buffer-live-p buffer)
+        (when-let ((process (get-buffer-process buffer)))
+          (delete-process process))
+        (kill-buffer buffer))
+      (delete-directory directory t))))
+
+(ert-deftest autolith-test-launched-session-tolerates-existing-attachment ()
+  (let* ((session-id "Ab3dE9x")
+         (autolith-last-session-id nil)
+         (autolith-last-chat-buffer nil)
+         (direct-buffer nil)
+         (attached-buffer
+          (generate-new-buffer " *Autolith existing attachment*")))
+    (unwind-protect
+        (progn
+          (setq direct-buffer
+                (autolith--make-term
+                 "*Autolith direct discovery race*"
+                 "/bin/cat" nil default-directory))
+          (with-current-buffer direct-buffer
+            (setq-local autolith-attachment-mode 'direct))
+          (with-current-buffer attached-buffer
+            (setq-local autolith-attachment-mode 'take-over))
+          (puthash session-id attached-buffer autolith--chat-buffers)
+          (setq autolith-last-chat-buffer attached-buffer)
+          (cl-letf (((symbol-function 'autolith--session-record-for-process)
+                     (lambda (_process)
+                       `(:session-id ,session-id :pid 123 :created-at 1))))
+            (should (equal session-id
+                           (autolith--bind-launched-session direct-buffer))))
+          (with-current-buffer direct-buffer
+            (should (equal session-id autolith-session-id))
+            (should
+             (string-match-p
+              (regexp-quote (autolith--display-session-id session-id))
+              header-line-format))
+            (should (equal session-id
+                           (process-get (get-buffer-process direct-buffer)
+                                        'autolith-session-id))))
+          (should (eq attached-buffer
+                      (gethash session-id autolith--chat-buffers)))
+          (should (eq attached-buffer autolith-last-chat-buffer))
+          (should (equal session-id autolith-last-session-id)))
+      (remhash session-id autolith--chat-buffers)
+      (dolist (buffer (list direct-buffer attached-buffer))
+        (when (buffer-live-p buffer)
+          (when-let ((process (get-buffer-process buffer)))
+            (delete-process process))
+          (kill-buffer buffer))))))
+
+(ert-deftest autolith-test-pending-direct-session-does-not-fall-back ()
+  (with-temp-buffer
+    (setq-local autolith-attachment-mode 'direct
+                autolith-session-id nil)
+    (let ((autolith-last-session-id "other12"))
+      (cl-letf (((symbol-function 'autolith--bind-launched-session)
+                 (lambda (_buffer) nil))
+                ((symbol-function 'autolith--session-record)
+                 (lambda (_session-id) '(:session-id "other12"))))
+        (should-error (autolith--target-session nil) :type 'user-error)))))
+
+(ert-deftest autolith-test-chat-install-does-not-reinitialize-term ()
+  (let ((buffer nil)
+        (term-mode-count 0)
+        (original-term-mode (symbol-function 'term-mode)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'term-mode)
+                   (lambda ()
+                     (setq term-mode-count (1+ term-mode-count))
+                     (funcall original-term-mode))))
+          (setq buffer
+                (autolith--make-term
+                 "*Autolith term initialization test*"
+                 "/bin/cat" nil default-directory))
+          (autolith--install-chat-process
+           buffer (get-buffer-process buffer) 'take-over)
+          (should (= 1 term-mode-count)))
+      (when (buffer-live-p buffer)
+        (when-let ((process (get-buffer-process buffer)))
+          (delete-process process))
+        (kill-buffer buffer)))))
+
+(ert-deftest autolith-test-history-navigation-uses-chat-scrollback ()
+  (let ((buffer nil)
+        (autolith-last-chat-buffer nil))
+    (unwind-protect
+        (progn
+          (setq buffer
+                (autolith--make-term
+                 "*Autolith history navigation test*"
+                 "/bin/cat" nil default-directory))
+          (let ((process (get-buffer-process buffer)))
+            (autolith--install-chat-process buffer process 'take-over)
+            (with-current-buffer buffer
+              (let ((inhibit-read-only t))
+                (goto-char (point-max))
+                (insert "old output\nnew output\n")
+                (set-marker (process-mark process) (point-max))))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (target &rest _arguments) target)))
+              (with-temp-buffer
+                (autolith-show-history))
+              (with-current-buffer buffer
+                (should (= (point-min) (point)))
+                (should (eq (current-local-map) term-mode-map)))
+              (with-temp-buffer
+                (autolith-jump-to-live))
+              (with-current-buffer buffer
+                (should (= (process-mark process) (point)))
+                (should (eq (current-local-map) term-raw-map))))))
+      (when (buffer-live-p buffer)
+        (when-let ((process (get-buffer-process buffer)))
+          (delete-process process))
+        (kill-buffer buffer)))))
+
 (ert-deftest autolith-test-message-limit-fails-before-process-start ()
   (let ((autolith-message-character-limit 3))
     (should-error (autolith--send-message "Ab3dE9x" "four")

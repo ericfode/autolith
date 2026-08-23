@@ -57,6 +57,20 @@ The single substitution receives the displayed session identifier."
   :type 'string
   :group 'autolith)
 
+(defcustom autolith-terminal-scrollback-lines 1048576
+  "Maximum lines retained in each Autolith terminal buffer.
+
+The default is large enough to preserve the localgroup server's bounded
+one-megacharacter replay even when every retained character ends a line.  Set
+this to zero to disable Emacs-side terminal truncation."
+  :type 'natnum
+  :group 'autolith)
+
+(defcustom autolith-session-discovery-timeout 60
+  "Seconds to wait for a newly launched Autolith session endpoint."
+  :type 'number
+  :group 'autolith)
+
 (defcustom autolith-enable-editor-bridge t
   "Whether the layer exposes scoped editor commands through emacsclient."
   :type 'boolean
@@ -102,17 +116,25 @@ When nil, use the spacemacs directory below Autolith's XDG state root."
 (defvar autolith-last-session-id nil
   "Most recently selected Autolith localgroup session ID.")
 
+(defvar autolith-last-chat-buffer nil
+  "Most recently displayed live Autolith terminal buffer.")
+
 (defvar-local autolith-session-id nil
   "Canonical localgroup session ID owned by the current chat buffer.")
 
 (defvar-local autolith-attachment-mode nil
   "Attachment mode used by the current chat buffer.")
 
+(defvar-local autolith--session-discovery-timer nil
+  "Pending one-shot timer discovering a launched Autolith session.")
+
 (defvar autolith-chat-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-d") #'autolith-detach)
     (define-key map (kbd "C-c C-s") #'autolith-send-prompt)
     (define-key map (kbd "C-c C-l") #'autolith-list-sessions)
+    (define-key map (kbd "C-c C-h") #'autolith-show-history)
+    (define-key map (kbd "C-c C-e") #'autolith-jump-to-live)
     map)
   "Keymap active in attached Autolith terminal buffers.")
 
@@ -132,6 +154,25 @@ When nil, use the spacemacs directory below Autolith's XDG state root."
       (user-error "Cannot find the Autolith executable %S"
                   autolith-executable))
     program))
+
+(defun autolith--default-start-directory ()
+  "Return the canonical directory for a new Autolith session."
+  (file-name-as-directory
+   (file-truename (or (autolith--project-root) default-directory))))
+
+(defun autolith--term-name (buffer-name)
+  "Return a `make-term' process name derived from BUFFER-NAME."
+  (string-remove-suffix "*" (string-remove-prefix "*" buffer-name)))
+
+(defun autolith--make-term (buffer-name program arguments directory)
+  "Create BUFFER-NAME running PROGRAM with ARGUMENTS in DIRECTORY."
+  (let ((default-directory (file-name-as-directory directory))
+        (term-buffer-maximum-size autolith-terminal-scrollback-lines))
+    (apply #'make-term
+           (autolith--term-name buffer-name)
+           program
+           nil
+           arguments)))
 
 (defun autolith--state-directory ()
   "Return the effective XDG state directory."
@@ -211,6 +252,40 @@ Return a validated plist without invoking the Emacs Lisp reader."
   (and (integerp pid)
        (process-attributes pid)))
 
+(defun autolith--pid-descendant-p (pid ancestor)
+  "Return non-nil when PID is ANCESTOR or one of its descendants."
+  (when (and (integerp pid) (integerp ancestor) (> pid 0) (> ancestor 0))
+    (let ((current pid)
+          (seen nil)
+          (remaining 64)
+          found)
+      (while (and current (> remaining 0) (not found))
+        (cond
+         ((= current ancestor)
+          (setq found t))
+         ((memq current seen)
+          (setq current nil))
+         (t
+          (push current seen)
+          (let ((attributes (ignore-errors (process-attributes current))))
+            (setq current
+                  (and attributes
+                       (alist-get 'ppid attributes))))))
+        (setq remaining (1- remaining)))
+      found)))
+
+(defun autolith--session-record-for-process (process)
+  "Return the live endpoint record owned by PROCESS or its descendants."
+  (when (process-live-p process)
+    (let ((root-pid (process-id process)))
+      (and (integerp root-pid)
+           (cl-find-if
+            (lambda (record)
+              (autolith--pid-descendant-p
+               (plist-get record :pid)
+               root-pid))
+            (autolith--session-records))))))
+
 (defun autolith--session-records ()
   "Return live localgroup endpoint records, newest first."
   (let ((directory (autolith--registry-directory)))
@@ -285,23 +360,139 @@ Return a validated plist without invoking the Emacs Lisp reader."
   (let ((buffer (gethash session-id autolith--chat-buffers)))
     (and (buffer-live-p buffer) buffer)))
 
+(defun autolith--last-chat-buffer ()
+  "Return the most recently displayed live Autolith terminal buffer."
+  (let ((buffer autolith-last-chat-buffer))
+    (if (and (buffer-live-p buffer)
+             (process-live-p (get-buffer-process buffer)))
+        buffer
+      (setq autolith-last-chat-buffer nil)
+      nil)))
+
+(defun autolith--cancel-session-discovery ()
+  "Cancel the current buffer's pending session discovery timer."
+  (when (timerp autolith--session-discovery-timer)
+    (cancel-timer autolith--session-discovery-timer))
+  (setq autolith--session-discovery-timer nil))
+
 (defun autolith--remove-chat-buffer ()
   "Remove the current chat buffer from attachment bookkeeping."
+  (autolith--cancel-session-discovery)
   (when autolith-session-id
     (let ((registered (gethash autolith-session-id autolith--chat-buffers)))
       (when (eq registered (current-buffer))
-        (remhash autolith-session-id autolith--chat-buffers)))))
+        (remhash autolith-session-id autolith--chat-buffers))))
+  (when (eq autolith-last-chat-buffer (current-buffer))
+    (setq autolith-last-chat-buffer nil)))
+
+(defun autolith--chat-header (session-id mode)
+  "Return the terminal header for SESSION-ID and attachment MODE."
+  (format
+   " Autolith %s  %s  C-c C-h history  C-c C-e live  C-c C-d %s  C-c C-s send"
+   (if session-id (autolith--display-session-id session-id) "starting")
+   mode
+   (if (eq mode 'direct) "stop" "detach")))
+
+(defun autolith--install-chat-process (buffer process mode)
+  "Install Autolith chat behavior for BUFFER, PROCESS, and MODE."
+  (with-current-buffer buffer
+    (term-char-mode)
+    (setq-local autolith-session-id nil
+                autolith-attachment-mode mode
+                term-buffer-maximum-size autolith-terminal-scrollback-lines
+                header-line-format (autolith--chat-header nil mode))
+    (autolith-chat-mode 1)
+    (add-hook 'kill-buffer-hook #'autolith--remove-chat-buffer nil t))
+  (process-put process 'autolith-previous-sentinel
+               (process-sentinel process))
+  (set-process-sentinel process #'autolith--attachment-sentinel)
+  (set-process-query-on-exit-flag process nil)
+  (setq autolith-last-chat-buffer buffer)
+  buffer)
+
+(defun autolith--register-chat-session (buffer process session-id)
+  "Register BUFFER and PROCESS as the live chat for SESSION-ID."
+  (when-let ((existing (autolith--chat-buffer session-id)))
+    (unless (eq existing buffer)
+      (user-error "Autolith session %s already has another live chat buffer"
+                  (autolith--display-session-id session-id))))
+  (with-current-buffer buffer
+    (autolith--cancel-session-discovery)
+    (setq-local autolith-session-id session-id
+                header-line-format
+                (autolith--chat-header session-id autolith-attachment-mode))
+    (rename-buffer
+     (format autolith-chat-buffer-format
+             (autolith--display-session-id session-id))
+     t))
+  (process-put process 'autolith-session-id session-id)
+  (puthash session-id buffer autolith--chat-buffers)
+  (setq autolith-last-session-id session-id
+        autolith-last-chat-buffer buffer)
+  session-id)
+
+(defun autolith--bind-launched-session (buffer)
+  "Discover and bind BUFFER to its directly launched Autolith session."
+  (when (buffer-live-p buffer)
+    (let ((process (get-buffer-process buffer)))
+      (when-let* ((record (and (process-live-p process)
+                               (autolith--session-record-for-process process)))
+                  (session-id (plist-get record :session-id)))
+        (let ((existing (autolith--chat-buffer session-id)))
+          (if (and existing (not (eq existing buffer)))
+              (progn
+                (with-current-buffer buffer
+                  (autolith--cancel-session-discovery)
+                  (setq-local autolith-session-id session-id
+                              header-line-format
+                              (autolith--chat-header
+                               session-id autolith-attachment-mode)))
+                (process-put process 'autolith-session-id session-id)
+                (setq autolith-last-session-id session-id)
+                session-id)
+            (autolith--register-chat-session buffer process session-id)))))))
+
+(defun autolith--schedule-session-discovery (buffer process deadline)
+  "Schedule another endpoint discovery for BUFFER and PROCESS before DEADLINE."
+  (when (and (buffer-live-p buffer) (process-live-p process))
+    (with-current-buffer buffer
+      (setq autolith--session-discovery-timer
+            (run-at-time 0.1 nil
+                         #'autolith--poll-launched-session
+                         buffer process deadline)))))
+
+(defun autolith--poll-launched-session (buffer process deadline)
+  "Bind BUFFER to PROCESS's endpoint, retrying until DEADLINE."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq autolith--session-discovery-timer nil))
+    (cond
+     ((not (process-live-p process))
+      nil)
+     ((autolith--bind-launched-session buffer)
+      t)
+     ((< (float-time) deadline)
+      (autolith--schedule-session-discovery buffer process deadline))
+     (t
+      (message
+       "Autolith started, but its localgroup endpoint was not discovered within %s seconds"
+       autolith-session-discovery-timeout)))))
 
 (defun autolith--attachment-sentinel (process event)
   "Run the terminal sentinel and clean up PROCESS after EVENT."
-  (let ((previous (process-get process 'autolith-previous-sentinel)))
+  (let ((buffer (process-buffer process))
+        (session-id (process-get process 'autolith-session-id))
+        (previous (process-get process 'autolith-previous-sentinel)))
     (when previous
-      (funcall previous process event)))
-  (unless (process-live-p process)
-    (let ((buffer (process-buffer process))
-          (session-id (process-get process 'autolith-session-id)))
+      (funcall previous process event))
+    (unless (process-live-p process)
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (autolith--cancel-session-discovery)))
       (when (eq (gethash session-id autolith--chat-buffers) buffer)
-        (remhash session-id autolith--chat-buffers)))))
+        (remhash session-id autolith--chat-buffers))
+      (when (eq autolith-last-chat-buffer buffer)
+        (setq autolith-last-chat-buffer nil)))))
 
 (defun autolith--attach-arguments (session-id mode)
   "Return Autolith attachment arguments for SESSION-ID and MODE."
@@ -311,12 +502,25 @@ Return a validated plist without invoking the Emacs Lisp reader."
             ('read-only '("--read-only"))
             (_ (error "Unsupported Autolith attachment mode %S" mode)))))
 
+(defun autolith--attachment-buffer-name (session-id)
+  "Return a clean canonical terminal buffer name for SESSION-ID."
+  (let* ((display-id (autolith--display-session-id session-id))
+         (buffer-name (format autolith-chat-buffer-format display-id))
+         (buffer (get-buffer buffer-name)))
+    (when buffer
+      (if (process-live-p (get-buffer-process buffer))
+          (user-error "Autolith buffer %s already has a live process" buffer-name)
+        (kill-buffer buffer)))
+    buffer-name))
+
 ;;;###autoload
 (defun autolith-attach (session-id &optional mode)
   "Attach a terminal buffer to Autolith SESSION-ID using MODE.
 
 Interactively, a prefix argument requests a read-only attachment.  Without a
-prefix argument, use `autolith-default-attach-mode'."
+prefix argument, use `autolith-default-attach-mode'.  Retained terminal output
+is replayed before live output and remains available through
+`autolith-show-history'."
   (interactive
    (list (autolith-read-session)
          (if current-prefix-arg
@@ -332,66 +536,127 @@ prefix argument, use `autolith-default-attach-mode'."
            (autolith--display-session-id session-id)
            (buffer-local-value 'autolith-attachment-mode existing)
            mode))
-      (let* ((display-id (autolith--display-session-id session-id))
-             (buffer-name (format autolith-chat-buffer-format display-id))
-             (term-name
-              (string-remove-suffix
-               "*"
-               (string-remove-prefix "*" buffer-name)))
+      (let* ((buffer-name (autolith--attachment-buffer-name session-id))
              (buffer
-              (apply #'make-term
-                     term-name
-                     (autolith--program)
-                     nil
-                     (autolith--attach-arguments session-id mode)))
+              (autolith--make-term
+               buffer-name
+               (autolith--program)
+               (autolith--attach-arguments session-id mode)
+               default-directory))
              (process (get-buffer-process buffer)))
         (unless process
           (kill-buffer buffer)
           (user-error "Autolith attachment did not start"))
-        (with-current-buffer buffer
-          (term-mode)
-          (term-char-mode)
-          (setq-local autolith-session-id session-id
-                      autolith-attachment-mode mode
-                      header-line-format
-                      (format " Autolith %s  %s  C-c C-d detach  C-c C-s send"
-                              display-id mode))
-          (autolith-chat-mode 1)
-          (add-hook 'kill-buffer-hook #'autolith--remove-chat-buffer nil t))
-        (process-put process 'autolith-session-id session-id)
-        (process-put process 'autolith-previous-sentinel
-                     (process-sentinel process))
-        (set-process-sentinel process #'autolith--attachment-sentinel)
-        (set-process-query-on-exit-flag process nil)
-        (puthash session-id buffer autolith--chat-buffers)
-        (setq autolith-last-session-id session-id)
+        (autolith--install-chat-process buffer process mode)
+        (autolith--register-chat-session buffer process session-id)
         (pop-to-buffer buffer)))))
 
 ;;;###autoload
+(defun autolith-start (&optional directory)
+  "Start a new interactive Autolith inferer in DIRECTORY.
+
+Without a prefix argument, use the current project root or `default-directory'.
+With a prefix argument, prompt for the workspace directory."
+  (interactive
+   (let ((default (autolith--default-start-directory)))
+     (list
+      (if current-prefix-arg
+          (read-directory-name "Start Autolith in: " default nil t)
+        default))))
+  (setq directory
+        (file-name-as-directory
+         (file-truename (or directory (autolith--default-start-directory)))))
+  (unless (file-directory-p directory)
+    (user-error "Autolith start directory does not exist: %s" directory))
+  (let* ((workspace-name
+          (file-name-nondirectory (directory-file-name directory)))
+         (buffer-name
+          (generate-new-buffer-name
+           (format autolith-chat-buffer-format
+                   (format "new %s" workspace-name))))
+         (buffer nil)
+         (process nil))
+    (condition-case condition
+        (progn
+          (setq buffer
+                (autolith--make-term
+                 buffer-name (autolith--program) nil directory)
+                process (get-buffer-process buffer))
+          (unless process
+            (user-error "Autolith inferer did not start"))
+          (autolith--install-chat-process buffer process 'direct)
+          (autolith--poll-launched-session
+           buffer process
+           (+ (float-time) autolith-session-discovery-timeout))
+          (pop-to-buffer buffer))
+      (error
+       (when (and (processp process) (process-live-p process))
+         (delete-process process))
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))
+       (signal (car condition) (cdr condition))))))
+
+;;;###autoload
 (defun autolith-focus-chat (&optional choose-session)
-  "Focus an attached Autolith buffer.
+  "Focus an Autolith terminal buffer.
 
 With CHOOSE-SESSION or an interactive prefix argument, prompt for the session."
   (interactive "P")
-  (let* ((session-id
-          (if choose-session
-              (autolith-read-session)
-            autolith-last-session-id))
-         (buffer (and session-id (autolith--chat-buffer session-id))))
+  (let ((recent (and (not choose-session) (autolith--last-chat-buffer))))
     (cond
-     (buffer
-      (pop-to-buffer buffer))
-     (session-id
-      (autolith-attach session-id))
+     (recent
+      (pop-to-buffer recent))
+     (choose-session
+      (autolith-attach (autolith-read-session)))
+     ((and autolith-last-session-id
+           (autolith--session-record autolith-last-session-id))
+      (autolith-attach autolith-last-session-id))
      (t
       (call-interactively #'autolith-attach)))))
 
+(defun autolith--history-buffer ()
+  "Return the current or most recent live Autolith terminal buffer."
+  (or (and autolith-chat-mode (current-buffer))
+      (autolith--last-chat-buffer)
+      (user-error "No live Autolith terminal buffer is available")))
+
+;;;###autoload
+(defun autolith-show-history ()
+  "Browse the oldest retained output in the current Autolith terminal."
+  (interactive)
+  (let ((buffer (autolith--history-buffer)))
+    (pop-to-buffer buffer)
+    (with-current-buffer buffer
+      (term-line-mode)
+      (setq-local term-scroll-to-bottom-on-output nil)
+      (goto-char (point-min)))
+    (message "Browsing Autolith history; use C-c C-e to return live")))
+
+;;;###autoload
+(defun autolith-jump-to-live ()
+  "Return to live character mode in the current Autolith terminal."
+  (interactive)
+  (let ((buffer (autolith--history-buffer)))
+    (pop-to-buffer buffer)
+    (with-current-buffer buffer
+      (let ((process (get-buffer-process buffer)))
+        (term-char-mode)
+        (goto-char
+         (if process (process-mark process) (point-max)))))))
+
 ;;;###autoload
 (defun autolith-detach ()
-  "Close the current Autolith attachment buffer."
+  "Close the current Autolith terminal buffer.
+
+A directly launched inferer is terminated; a localgroup attachment closes only
+the attachment client."
   (interactive)
-  (unless autolith-session-id
-    (user-error "The current buffer is not an Autolith attachment"))
+  (unless autolith-chat-mode
+    (user-error "The current buffer is not an Autolith terminal"))
+  (when (and (eq autolith-attachment-mode 'direct)
+             (called-interactively-p 'interactive)
+             (not (yes-or-no-p "Terminate this directly launched Autolith session? ")))
+    (user-error "Autolith session kept running"))
   (let ((process (get-buffer-process (current-buffer))))
     (when (process-live-p process)
       (delete-process process)))
@@ -406,6 +671,10 @@ With CHOOSE-SESSION or an interactive prefix argument, prompt for the session."
           ((and autolith-session-id
                 (autolith--session-record autolith-session-id))
            autolith-session-id)
+          ((eq autolith-attachment-mode 'direct)
+           (or (autolith--bind-launched-session (current-buffer))
+               (user-error
+                "The launched Autolith session has not published its endpoint yet")))
           ((and autolith-last-session-id
                 (autolith--session-record autolith-last-session-id))
            autolith-last-session-id)
