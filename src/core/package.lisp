@@ -325,6 +325,14 @@
   (:import-from #:usocket
                 #:ns-error
                 #:socket-error)
+  (:import-from #:websocket-driver
+                #:close-connection
+                #:on
+                #:ready-state
+                #:send
+                #:start-connection)
+  (:import-from #:websocket-driver-client
+                #:make-client)
   (:import-from #:sbcl-workers
                 #:+minimum-sbcl-worker-core-size+
                 #:+pristine-sbcl-worker-image-identifier+

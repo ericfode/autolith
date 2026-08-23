@@ -46,6 +46,10 @@
  (:class qlot/source/ql:source-ql
   :initargs (:%version "2026-01-01")
   :version "ql-2026-01-01"))
+("websocket-driver" .
+ (:class qlot/source/ql:source-ql
+  :initargs (:%version "2026-01-01")
+  :version "ql-2026-01-01"))
 ("yason" .
  (:class qlot/source/ql:source-ql
   :initargs (:%version "2026-01-01")

@@ -37,6 +37,7 @@
                #:sexp-store
                #:structlisp
                #:usocket
+               #:websocket-driver-client
                #:yason)
   :components ((:module "src"
                 :serial t
