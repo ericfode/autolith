@@ -42,8 +42,8 @@
   "The grok-build release whose Grok proxy wire protocol Autolith implements.")
 
 
-;; Nous Portal authentication and inference behavior verified against Hermes
-;; Agent reference commit f293e7206b4ddd66042329442c6afebc19a8808d.
+;; Nous Portal authentication and inference behavior verified against
+;; Hermes Agent reference commit f293e7206b4ddd66042329442c6afebc19a8808d.
 (defparameter *nous-portal-url* "https://portal.nousresearch.com"
   "The Nous Research portal serving OAuth device authentication.")
 
@@ -182,14 +182,14 @@
   '("gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.6-terra")
   "Codex model identifiers verified to support the Fast service tier.")
 
-;; GPT window sizes read from the live Codex model catalog on 2026-07-19 and
-;; confirmed in Codex reference commit 0fb559f0f6e231a88ac02ea002d3ecd248e2b515.
+;; GPT-5.6 Sol, Luna, and Terra use a 1,050,000-token context window.
+;; Metadata reference: NousResearch/hermes-agent commit 8db59d08f45ba6285908be554da14e96ce5b3643.
 ;; The Grok window comes from default_models.json in grok-build reference
 ;; commit 47348d13.
 (defparameter *model-context-windows*
-  '(("gpt-5.6-sol"   . 272000)
-    ("gpt-5.6-luna"  . 272000)
-    ("gpt-5.6-terra" . 272000)
+  '(("gpt-5.6-sol"   . 1050000)
+    ("gpt-5.6-luna"  . 1050000)
+    ("gpt-5.6-terra" . 1050000)
     ("grok-4.5"      . 500000)
     ("accounts/fireworks/models/kimi-k3" . 1048576))
   "Provider context window sizes in tokens for known models.")

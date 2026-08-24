@@ -710,6 +710,7 @@ model's effort choice to CONFIGURATION--CLONE."
                        (application-provider application) new-provider
                        (application-tool-registry application) new-registry
                        (application-agent application) new-agent)
+                  (application-refresh-context-meter application)
                  (application-connect-task-presentation application)
                  (context-runtime-reset)
                  (setf committed-p t))
@@ -725,7 +726,8 @@ model's effort choice to CONFIGURATION--CLONE."
             (setf (application-configuration application) old-configuration
                   (application-provider application) old-provider
                   (application-tool-registry application) old-registry
-                  (application-agent application) old-agent))
+                  (application-agent application) old-agent)
+            (application-refresh-context-meter application))
           (application--extension-registry-restore
            extension-registry-snapshot)
           (when new-registry
@@ -973,6 +975,7 @@ newly acquired lease."
                            nil
                            (application-history-floor-sequence application)
                            restored-history-floor-sequence))
+                          (application-refresh-context-meter application)
                         (application-connect-task-presentation application)
                         (application--load-goal application)
                         (application-publish-recovery-session application)
@@ -1176,6 +1179,7 @@ newly acquired lease."
                 (application-history-floor-sequence new-application)
                 restored-history-floor-sequence
                 (application-mutation-replay-failures new-application) nil))
+              (application-refresh-context-meter new-application)
              (application--load-goal new-application)
              (image-state-reconnect)
              (setf retirement-started-p t
@@ -1265,6 +1269,24 @@ newly acquired lease."
         (application-update-check-thread application) nil)
   application)
 
+(-> application-refresh-context-meter (application) null)
+(defun application-refresh-context-meter (application)
+  "Refresh APPLICATION's persistent context meter from its active runtime."
+  (when (and (slot-boundp application 'ui)
+             (slot-boundp application 'configuration)
+             (slot-boundp application 'conversation))
+    (let ((ui (application-ui application)))
+      (when ui
+        (let ((configuration (application-configuration application)))
+          (terminal-ui-set-context-usage
+           ui
+           :used (conversation-last-total-tokens
+                  (application-conversation application))
+           :window (configuration-context-window configuration)
+           :compaction-limit
+           (configuration-compaction-token-limit configuration))))))
+  nil)
+
 (-> application--install-configuration
     (application configuration &key (:conversation (option conversation)))
     null)
@@ -1288,6 +1310,7 @@ newly acquired lease."
           (application-conversation application) active-conversation
           (application-provider application) provider
           (application-agent application) agent))
+  (application-refresh-context-meter application)
   nil)
 
 (-> application--agent-adopt-runtime (application agent) null)
@@ -1438,6 +1461,7 @@ command replaced the active conversation."
                        (application-provider application) provider
                        (application-tool-registry application) registry
                        (application-agent application) agent)
+                  (application-refresh-context-meter application)
                  (application-connect-task-presentation application)
                  (context-runtime-reset)
                  (setf committed-p t))
@@ -1463,7 +1487,8 @@ command replaced the active conversation."
                   (application-tool-registry application)
                   previous-registry
                   (application-agent application)
-                  previous-agent))
+                  previous-agent)
+            (application-refresh-context-meter application))
           (when process-moved-p
             (handler-case
                 (progn
@@ -1669,6 +1694,7 @@ command replaced the active conversation."
                (not
                 (eq previous-conversation-lease conversation-lease)))
       (conversation-lease-release previous-conversation-lease))
+    (application-refresh-context-meter application)
     application))
 
 (-> application-install-conversation (application conversation) application)
@@ -2715,6 +2741,7 @@ remain finalized so later conversation replay cannot duplicate streamed rows."
 (-> application-set-activity (application (option string)) terminal-ui)
 (defun application-set-activity (application status)
   "Set APPLICATION's live STATUS and snapshot its contextual details once."
+  (application-refresh-context-meter application)
   (terminal-ui-set-status
    (application-ui application)
    status
@@ -2972,6 +2999,7 @@ remain finalized so later conversation replay cannot duplicate streamed rows."
                        (getf details :maximum-attempts)
                        (getf details :delay)))))
            (:provider-request-completed
+            (application-refresh-context-meter application)
             (reasoning-flush)
             (let ((completed-stream-text
                     (and stream-open-p (text-buffer-string stream-text)))
