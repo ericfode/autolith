@@ -120,9 +120,9 @@
  :description "ChatGPT Codex subscription"
  :family ':codex
  :protocol ':responses
- :models '("gpt-5.6-sol"
-           "gpt-5.6-luna"
-           "gpt-5.6-terra")
+ :models '((:name "gpt-5.6-sol" :context-window 1050000)
+           (:name "gpt-5.6-luna" :context-window 1050000)
+           (:name "gpt-5.6-terra" :context-window 1050000))
  :factory #'provider--codex-registration-factory
  :source ':builtin)
 
