@@ -874,13 +874,59 @@
                  :pathname pathname
                  :stage ':replay-probe))))))
 
+(-> image-commit--source-probe-base-content (pathname list) string)
+(defun image-commit--source-probe-base-content (pathname entries)
+  "Return recorded base definitions in PATHNAME source order."
+  (let* ((package (find-package '#:autolith))
+         (source (uiop:read-file-string pathname))
+         (seen nil))
+    (prog1
+        (with-output-to-string (stream)
+          (dolist (source-form (source-read-forms source :package package))
+            (let* ((form (source-form-form source-form))
+                   (target (and (definition-form-p form)
+                                (definition-key form)))
+                   (entry (and target
+                               (find target entries
+                                     :key (lambda (candidate)
+                                            (getf candidate :target))
+                                     :test #'string=))))
+              (when entry
+                (let ((provenance (getf entry :source-provenance)))
+                  (unless (string= (source-definition-identity form)
+                                   (getf provenance :target-identity))
+                    (error 'image-commit-error
+                           :message
+                           (format nil "Clean replay source ~A does not contain target definition ~A."
+                                   pathname target)
+                           :tool-name "self.commit"
+                           :pathname pathname
+                           :stage ':replay-probe))
+                  (when (getf provenance :base-present-p)
+                    (write-string (getf provenance :base-source) stream)
+                    (terpri stream)
+                    (terpri stream))
+                  (pushnew target seen :test #'string=))))))
+      (dolist (entry entries)
+        (unless (find (getf entry :target) seen :test #'string=)
+          (error 'image-commit-error
+                 :message
+                 (format nil "Clean replay source ~A is missing target definition ~A."
+                         pathname (getf entry :target))
+                 :tool-name "self.commit"
+                 :pathname pathname
+                 :stage ':replay-probe))))))
+
 (-> image-commit--call-with-source-probe-script
     (configuration pathname list function)
     t)
 (defun image-commit--call-with-source-probe-script
     (configuration script entries function)
   "Call FUNCTION with a script that replays source overlays against their bases."
-  (let ((groups (image-commit--source-probe-groups entries)))
+  (let ((groups
+          (sort (copy-list (image-commit--source-probe-groups entries))
+                #'string<
+                :key #'first)))
     (if (null groups)
         (funcall function script)
         (let* ((root
@@ -888,9 +934,19 @@
                   (format nil "image-commit-replay-probe-~A/"
                           (make-identifier))
                   (configuration-cache-root configuration)))
+               (base-definitions
+                 (merge-pathnames "probe-base-definitions.lisp" root))
                (wrapper (merge-pathnames "probe-reconstruct.lisp" root)))
           (unwind-protect
                (progn
+                 (ensure-directories-exist base-definitions)
+                 (with-open-file
+                     (stream base-definitions
+                             :direction ':output
+                             :if-exists ':supersede
+                             :if-does-not-exist ':create
+                             :external-format ':utf-8)
+                   (format stream "(in-package #:autolith)~2%"))
                  (dolist (group groups)
                    (let* ((relative-pathname (first group))
                           (source-pathname
@@ -922,14 +978,25 @@
                        (write-string
                         (image-commit--source-probe-content
                          source-pathname (rest group))
+                        stream))
+                     (with-open-file
+                         (stream base-definitions
+                                 :direction ':output
+                                 :if-exists ':append
+                                 :external-format ':utf-8)
+                       (write-string
+                        (image-commit--source-probe-base-content
+                         source-pathname (rest group))
                         stream))))
+                 (sb-posix:chmod (namestring base-definitions) #o444)
                  (image-commit--write-atomically
                   wrapper
                   (lambda (stream)
                     (format stream "(in-package #:autolith)~2%")
                     (format stream
-                            "(let ((*source-hotload-replay-root* (pathname ~S)))~%~2T(load (pathname ~S)))~%"
+                            "(let ((*source-hotload-replay-root* (pathname ~S)))~%~2T(load (pathname ~S))~%~2T(load (pathname ~S)))~%"
                             (namestring root)
+                            (namestring base-definitions)
                             (namestring script))))
                  (funcall function wrapper))
             (when (probe-file root)
@@ -1008,6 +1075,15 @@
            (let ((record (symbol-value '*active-image-build-record*)))
              (and (listp record)
                   (getf (rest record) :source-commit))))))
+
+(-> image-commit--restore-pointer (pathname boolean (option string)) null)
+(defun image-commit--restore-pointer (pathname present-p content)
+  "Restore PATHNAME's exact preceding pointer state."
+  (if present-p
+      (image-commit--write-string-atomically pathname content)
+      (when (probe-file pathname)
+        (delete-file pathname)))
+  nil)
 
 (-> image-commit-publish
     (configuration
@@ -1089,19 +1165,52 @@
                                       :history-commit history-commit)))
             (when selection-check
               (funcall selection-check))
-            (image-commit--write-form-atomically
-             (configuration-current-image-commit-path configuration)
-             (list :current-image-commit
-                   :version 2
-                   :id identifier
-                   :manifest (namestring manifest-pathname)
-                   :history-commit history-commit))
-            (setf *active-image-commit-identifier* identifier
-                  *active-image-history-commit* history-commit)
-            (dolist (mutation-record mutation-records)
-              (remhash (getf (rest mutation-record) :id)
-                       *exploratory-undo-actions*))
-            commit))
+            (let* ((pointer
+                     (configuration-current-image-commit-path configuration))
+                   (previous-pointer-present-p
+                     (not (null (probe-file pointer))))
+                   (previous-pointer-content
+                     (and previous-pointer-present-p
+                          (uiop:read-file-string pointer)))
+                   (previous-active-identifier
+                     *active-image-commit-identifier*)
+                   (previous-active-history-commit
+                     *active-image-history-commit*))
+              (handler-case
+                  (progn
+                    (image-commit--write-form-atomically
+                     pointer
+                     (list :current-image-commit
+                           :version 2
+                           :id identifier
+                           :manifest (namestring manifest-pathname)
+                           :history-commit history-commit))
+                    (when selection-check
+                      (funcall selection-check))
+                    (setf *active-image-commit-identifier* identifier
+                          *active-image-history-commit* history-commit)
+                    (dolist (mutation-record mutation-records)
+                      (remhash (getf (rest mutation-record) :id)
+                               *exploratory-undo-actions*))
+                    commit)
+                (error (condition)
+                  (handler-case
+                      (progn
+                        (image-commit--restore-pointer
+                         pointer
+                         previous-pointer-present-p
+                         previous-pointer-content)
+                        (setf *active-image-commit-identifier*
+                              previous-active-identifier
+                              *active-image-history-commit*
+                              previous-active-history-commit))
+                    (error (restoration-condition)
+                      (error 'active-image-corruption
+                             :message
+                             "A failed private selection could not restore its preceding pointer."
+                             :original-condition condition
+                             :restoration-condition restoration-condition)))
+                  (error condition))))))
       (source-hotload-error (condition)
         (when (probe-file directory)
           (uiop:delete-directory-tree directory
@@ -1109,6 +1218,12 @@
                                       :if-does-not-exist ':ignore))
         (error condition))
       (image-commit-error (condition)
+        (when (probe-file directory)
+          (uiop:delete-directory-tree directory
+                                      :validate t
+                                      :if-does-not-exist ':ignore))
+        (error condition))
+      (active-image-corruption (condition)
         (when (probe-file directory)
           (uiop:delete-directory-tree directory
                                       :validate t

@@ -45,6 +45,16 @@
     "src/core/package.lisp")
   "Tracked build, dependency, and package files that always require a rebuild.")
 
+(defparameter *source-hotload-protected-paths*
+  '("src/configuration/settings.lisp"
+    "src/core/source-files.lisp"
+    "src/provider/authentication.lisp"
+    "src/self/tools.lisp"
+    "src/state/durable-mutations.lisp"
+    "src/state/image-commits.lisp"
+    "src/state/source-hotload.lisp")
+  "Source files implementing source transactions that always require a rebuild.")
+
 (-> source-hotload--error
     (configuration keyword keyword string
      &key (:relative-pathname (option string)) (:pathname (option pathname)))
@@ -245,6 +255,14 @@
            ':preflight
            ':build-boundary-changed
            (format nil "Tracked build, package, or dependency input ~A changed; rebuild Autolith instead of hot loading."
+                   name)
+           :relative-pathname name))
+        (when (find name *source-hotload-protected-paths* :test #'string=)
+          (source-hotload--error
+           configuration
+           ':preflight
+           ':protected-source-changed
+           (format nil "Source transaction implementation ~A changed; rebuild Autolith instead of replacing the active transaction kernel."
                    name)
            :relative-pathname name))
         (when (and name
@@ -748,6 +766,16 @@
              (transaction-identifier (make-identifier))
              (records nil)
              (commit nil)
+             (install-definition
+               (symbol-function 'self--install-definition-journaled))
+             (check-active
+               (symbol-function 'mutation-checker-check-active))
+             (publish (symbol-function 'image-commit-publish))
+             (verify-snapshot
+               (symbol-function 'source-hotload--verify-snapshot))
+             (rollback (symbol-function 'source-hotload--rollback))
+             (append-journal (symbol-function 'mutation-journal-append))
+             (describe-condition (symbol-function 'bounded-string))
              (source-states
                (remove-duplicates
                 (mapcar (lambda (change)
@@ -755,7 +783,8 @@
                                 :source-state))
                         changes)
                 :test #'eq)))
-        (mutation-journal-append
+        (funcall
+         append-journal
          configuration
          (list :mutation
                :kind ':source-load
@@ -774,7 +803,8 @@
             (progn
               (dolist (change changes)
                 (multiple-value-bind (result identifier record)
-                    (self--install-definition-journaled
+                    (funcall
+                     install-definition
                      configuration
                      (source-hotload-change-source change)
                      :package (source-hotload-change-package change)
@@ -785,7 +815,8 @@
                   (declare (ignore result identifier))
                   (push record records)))
               (setf records (nreverse records))
-              (mutation-checker-check-active
+              (funcall
+               check-active
                checker
                configuration
                (with-output-to-string (stream)
@@ -794,19 +825,22 @@
                    (terpri stream)
                    (terpri stream))))
               (setf commit
-                    (image-commit-publish
+                    (funcall
+                     publish
                      configuration
                      :title title
                      :mutation-records records
                      :additional-entries nil
                      :selection-check
                      (lambda ()
-                       (source-hotload--verify-snapshot
+                       (funcall
+                        verify-snapshot
                         configuration
                         baseline
                         repository-commit
                         source-snapshots))))
-              (mutation-journal-append
+              (funcall
+               append-journal
                configuration
                (list :mutation
                      :kind ':source-load
@@ -820,8 +854,9 @@
               (values commit (length changes) source-states))
           (error (condition)
             (unless commit
-              (source-hotload--rollback configuration records condition)
-              (mutation-journal-append
+              (funcall rollback configuration records condition)
+              (funcall
+               append-journal
                configuration
                (list :mutation
                      :kind ':source-load
@@ -830,7 +865,8 @@
                      :baseline-commit baseline
                      :repository-commit repository-commit
                      :result ':failed
-                     :condition (bounded-string condition :limit 2000))))
+                     :condition
+                     (funcall describe-condition condition :limit 2000))))
             (error condition)))))))
 
 (defmethod tool-execute ((tool self-load-source-changes-tool)

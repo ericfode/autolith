@@ -962,13 +962,15 @@ protocol."
 (defun source-definition-shape (definition)
   "Return DEFINITION's reload-compatible structural and callable signature."
   (case (first definition)
-    ((defun defgeneric defmacro deftype define-compiler-macro
+    ((defun defmacro deftype define-compiler-macro
       define-context-contributor)
      (list (definition-signature definition) (third definition)))
+    (defgeneric
+     definition)
     (define-application-command
      (list (definition-signature definition)
-           (fourth definition)
-           (getf (second (rest definition)) :call-lambda-list)))
+           (third definition)
+           (fourth definition)))
     (defmethod
      (let* ((tail (rest (rest definition)))
             (lambda-position (position-if #'listp tail)))
@@ -976,8 +978,11 @@ protocol."
              (nth lambda-position tail))))
     ((defclass defstruct define-condition)
      definition)
+    ((defvar defparameter)
+     (definition-signature definition))
     (otherwise
-     (definition-signature definition))))
+     (error "Unsupported source definition operator ~S."
+            (first definition)))))
 
 (-> source-hotload-provenance-p (t) boolean)
 (defun source-hotload-provenance-p (provenance)

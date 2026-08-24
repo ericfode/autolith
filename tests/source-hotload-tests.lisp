@@ -49,6 +49,48 @@
            (eval-when (:load-toplevel) (print :side-effect))~]~%"
           package-name first value side-effect-p))
 
+(defparameter *test-source-hotload-command-metadata*
+  '(:name "/source-hotload"
+    :aliases ("/source-hotload-alias")
+    :argument nil
+    :description "Source hot-load command fixture"
+    :tip "Source hot-load command fixture tip."
+    :busy-behavior :inspect
+    :terminal-behavior :shared
+    :call-lambda-list ()
+    :slash-argument-mode :none)
+  "Complete application command metadata used by source shape tests.")
+
+(-> test-source-hotload-shape-source
+    (&key (:generic-options list) (:command-metadata list)
+          (:command-lambda-list list))
+    string)
+(defun test-source-hotload-shape-source
+    (&key
+       (generic-options '((:documentation "Source hot-load generic fixture.")))
+       (command-metadata *test-source-hotload-command-metadata*)
+       (command-lambda-list '(application)))
+  "Return source fixtures for structural definition rejection tests."
+  (let ((generic
+          (append '(defgeneric test-source-hotload-generic (value))
+                  generic-options))
+        (command
+          (list 'define-application-command
+                'test-source-hotload-command
+                command-metadata
+                command-lambda-list
+                '(declare (ignore application))
+                ':continue)))
+    (format nil "(in-package #:autolith)~2%~S~2%~S~%"
+            generic command)))
+
+(-> test-source-hotload-plist-replace (list keyword t) list)
+(defun test-source-hotload-plist-replace (plist key value)
+  "Return a copy of PLIST with KEY replaced by VALUE."
+  (let ((result (copy-list plist)))
+    (setf (getf result key) value)
+    result))
+
 (-> test-source-hotload-write (pathname string) pathname)
 (defun test-source-hotload-write (pathname source)
   "Write exact fixture SOURCE to PATHNAME."
@@ -119,6 +161,14 @@
                                       (test-source-hotload-baseline-source))
            (test-source-hotload-write
             other-pathname
+            (format nil
+                    "(in-package #:autolith)~2%~
+                     (defun test-source-hotload-other () :baseline)~%"))
+           (test-source-hotload-write
+            (merge-pathnames "src/shapes.lisp" root)
+            (test-source-hotload-shape-source))
+           (test-source-hotload-write
+            (merge-pathnames "src/state/source-hotload.lisp" root)
             (format nil
                     "(in-package #:autolith)~2%~
                      (defun test-source-hotload-other () :baseline)~%"))
@@ -454,6 +504,193 @@
                       "failed source hot-load batches discard installed journal records")))))
   nil)
 
+(-> test-source-hotload-protected-kernel () null)
+(defun test-source-hotload-protected-kernel ()
+  "Test source transactions reject their implementation before installation."
+  (test-call-with-source-hotload-fixture
+   (lambda (configuration root source-pathname other-pathname baseline)
+     (declare (ignore source-pathname other-pathname baseline))
+     (let* ((protected-pathname
+              (merge-pathnames "src/state/source-hotload.lisp" root))
+            (previous-function
+              (symbol-function 'test-source-hotload-other))
+            (previous-value *test-source-hotload-value*)
+            (previous-active-identifier *active-image-commit-identifier*)
+            (previous-active-history *active-image-history-commit*)
+            (journal (configuration-journal-path configuration))
+            (previous-journal
+              (and (probe-file journal) (uiop:read-file-string journal)))
+            (reason nil))
+       (test-source-hotload-write
+        protected-pathname
+        (format nil
+                "(in-package #:autolith)~2%~
+                 (defun test-source-hotload-other () :replaced-kernel)~%"))
+       (setf reason
+             (handler-case
+                 (progn
+                   (source-hotload-apply
+                    configuration
+                    (test-source-hotload-checker)
+                    '("src/state/source-hotload.lisp")
+                    :title "Reject transaction replacement")
+                   nil)
+               (source-hotload-error (condition)
+                 (source-hotload-error-reason condition))))
+       (test-assert (eq reason ':protected-source-changed)
+                    "transaction implementation changes require a rebuild")
+       (test-assert
+        (and (eq (symbol-function 'test-source-hotload-other)
+                 previous-function)
+             (eq (test-source-hotload-other) ':baseline)
+             (eq *test-source-hotload-value* previous-value)
+             (equal *active-image-commit-identifier*
+                    previous-active-identifier)
+             (equal *active-image-history-commit* previous-active-history)
+             (null (image-commit-current configuration))
+             (null (image-commit-pending-records configuration))
+             (equal (and (probe-file journal)
+                         (uiop:read-file-string journal))
+                    previous-journal))
+        "protected transaction rejection preserves exact previous live state"))))
+  nil)
+
+(-> test-source-hotload-post-pointer-race () null)
+(defun test-source-hotload-post-pointer-race ()
+  "Test source races after pointer selection restore all preceding state."
+  (test-call-with-source-hotload-fixture
+   (lambda (configuration root source-pathname other-pathname baseline)
+     (declare (ignore root other-pathname baseline))
+     (test-source-hotload-write
+      source-pathname
+      (test-source-hotload-target-source
+       :first ':first-overlay
+       :value ':first-overlay))
+     (let* ((first-commit
+              (source-hotload-apply
+               configuration
+               (test-source-hotload-checker)
+               '("src/hotload.lisp")
+               :title "Load selection race base"))
+            (pointer
+              (configuration-current-image-commit-path configuration))
+            (previous-pointer (uiop:read-file-string pointer))
+            (previous-function
+              (symbol-function 'test-source-hotload-first))
+            (previous-active-identifier *active-image-commit-identifier*)
+            (previous-active-history *active-image-history-commit*)
+            (writer
+              (symbol-function 'image-commit--write-form-atomically))
+            (race-fired-p nil)
+            (reason nil))
+       (test-source-hotload-write
+        source-pathname
+        (test-source-hotload-target-source
+         :first ':second-overlay
+         :value ':second-overlay))
+       (unwind-protect
+            (progn
+              (setf (symbol-function 'image-commit--write-form-atomically)
+                    (lambda (pathname form)
+                      (prog1 (funcall writer pathname form)
+                        (when (and (not race-fired-p)
+                                   (equal pathname pointer))
+                          (setf race-fired-p t)
+                          (test-source-hotload-write
+                           source-pathname
+                           (test-source-hotload-target-source
+                            :first ':raced
+                            :value ':raced))))))
+              (setf reason
+                    (handler-case
+                        (progn
+                          (source-hotload-apply
+                           configuration
+                           (test-source-hotload-checker)
+                           '("src/hotload.lisp")
+                           :title "Reject post-pointer source race")
+                          nil)
+                      (source-hotload-error (condition)
+                        (source-hotload-error-reason condition)))))
+         (setf (symbol-function 'image-commit--write-form-atomically)
+               writer))
+       (test-assert
+        (and race-fired-p (eq reason ':source-snapshot-changed))
+        "source changes after pointer publication fail final selection")
+       (test-assert
+        (and (string= (uiop:read-file-string pointer) previous-pointer)
+             (equal *active-image-commit-identifier*
+                    previous-active-identifier)
+             (equal *active-image-history-commit* previous-active-history)
+             (string= (image-commit-identifier
+                       (image-commit-current configuration))
+                      (image-commit-identifier first-commit))
+             (eq (symbol-function 'test-source-hotload-first)
+                 previous-function)
+             (eq (test-source-hotload-first) ':first-overlay)
+             (eq *test-source-hotload-value* ':first-overlay)
+             (null (image-commit-pending-records configuration)))
+        "post-pointer failure restores pointer, active state, and definitions"))))
+  nil)
+
+(-> test-source-hotload-structural-boundary () null)
+(defun test-source-hotload-structural-boundary ()
+  "Test generic and command registration structure requires a rebuild."
+  (test-call-with-source-hotload-fixture
+   (lambda (configuration root source-pathname other-pathname baseline)
+     (declare (ignore source-pathname other-pathname))
+     (let ((shape-pathname (merge-pathnames "src/shapes.lisp" root)))
+       (labels ((reason-for-current-shape ()
+                  "Return the source preflight reason for the current shape."
+                  (handler-case
+                      (progn
+                        (source-hotload-plan
+                         configuration
+                         '("src/shapes.lisp")
+                         :baseline baseline)
+                        nil)
+                    (source-hotload-error (condition)
+                      (source-hotload-error-reason condition)))))
+         (dolist (generic-options
+                  '(((:documentation "Changed generic documentation."))
+                    ((:documentation "Source hot-load generic fixture.")
+                     (:method-combination progn))))
+           (test-source-hotload-write
+            shape-pathname
+            (test-source-hotload-shape-source
+             :generic-options generic-options))
+           (test-assert
+            (eq (reason-for-current-shape) ':definition-signature-changed)
+            "generic options are structural source changes"))
+         (dolist (case
+                  '((:name "/changed-source-hotload")
+                    (:aliases ("/changed-source-hotload-alias"))
+                    (:argument "VALUE")
+                    (:description "Changed command description")
+                    (:tip "Changed command tip.")
+                    (:busy-behavior :hold)
+                    (:terminal-behavior :exclusive)
+                    (:call-lambda-list (&optional value))
+                    (:slash-argument-mode :first)))
+           (destructuring-bind (key value) case
+             (test-source-hotload-write
+              shape-pathname
+              (test-source-hotload-shape-source
+               :command-metadata
+               (test-source-hotload-plist-replace
+                *test-source-hotload-command-metadata* key value)))
+             (test-assert
+              (eq (reason-for-current-shape) ':definition-signature-changed)
+              "every command metadata field is structural")))
+         (test-source-hotload-write
+          shape-pathname
+          (test-source-hotload-shape-source
+           :command-lambda-list '(application value)))
+         (test-assert
+          (eq (reason-for-current-shape) ':definition-signature-changed)
+          "application command handler lambda lists are structural")))))
+  nil)
+
 (-> test-source-hotload-successive-batches () null)
 (defun test-source-hotload-successive-batches ()
   "Test successive overlays, failed replacement rollback, and base retirement."
@@ -700,6 +937,11 @@
                           (source-definition-identity target-definition)))
                   (entries
                     (list
+                     (list :kind ':legacy
+                           :id (make-identifier)
+                           :target "clean-process-base-assertion"
+                           :source
+                           "(unless (= *image-commit-replay-probe-version* 0) (error \"Recorded base definition was not active before source replay.\"))")
                      (list :kind ':legacy
                            :id (make-identifier)
                            :target "clean-process-sentinel"
