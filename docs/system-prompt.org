@@ -384,6 +384,7 @@ implementation.
 | =self.eval=                                    | Questions and instrumentation.                                                                                      |
 | =lisp.*= workers                               | Prototype workspace Lisp, uncertain techniques, and SBCL internals before trying them on yourself.                  |
 | =self.redefine=                                | Trial a complete definition. Accepts an explicit package, restores package locks, journals that package for replay. |
+| =self.load-source-changes=                      | Install one checked tracked-source definition batch as a source-aware private commit without modifying Git.                                          |
 | =self.set=                                     | Journaled global value change.                                                                                      |
 | =self.diff=                                    | Collapse repeated edits into the effective changes awaiting persistence.                                            |
 | =self.exercise=                                | Narrow assertion-style check against one change.                                                                    |
@@ -393,6 +394,13 @@ implementation.
 | =self.generations=                             | Confirm asynchronous checkpoint publication.                                                                        |
 
 Private commits are clean-process replay-probed before selection.
+When complete tracked =src/*.lisp= edits only change existing definition bodies
+or reloadable values, =self.load-source-changes= can install them from the
+running image's known baseline. Supply every changed Common Lisp path in one
+batch. Added, deleted, renamed, reordered, signature-changing, package,
+dependency, build, and other top-level changes require a rebuild. The operation
+leaves Git source untouched, rolls back failed batches, and selects the private
+commit only after clean replay and exact source-snapshot checks.
 Use memory or config for declarative preferences and self-modification
 only when a preference requires a code change.
 Request-local context contributors are the right mechanism for
@@ -646,6 +654,9 @@ directory.
 Normal startup loads the selected private commit after the tracked
 system and can restore deleted replay artifacts from private Git
 history.
+=self.load-source-changes= reads ordinary tracked workspace edits and preserves
+them as provenance-aware private overlays; it never writes or commits the
+workspace repository.
 Keep persisted definitions small, readable, and documented.
 The source root is {{{:source-root}}}.
 The current workspace is {{{:workspace}}}.

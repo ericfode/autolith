@@ -404,6 +404,27 @@ The default pool admits eight concurrent children.
 =AUTOLITH_TASK_MAX_CONCURRENCY= raises that up to 32. Child jobs have no
 deadline unless =AUTOLITH_TASK_MAX_RUNTIME_MS= is set positive.
 
+* Source-backed active updates
+
+=self.load-source-changes= installs a complete batch of tracked Common Lisp
+source edits into the running active image without writing or committing Git
+source. Pass every changed =src/*.lisp= path in the source boundary and a short
+private commit title.
+
+The running image must have a clean, known source baseline that is an ancestor
+of the checkout. The batch may change bodies and reloadable values of existing
+definitions. Added, deleted, renamed, reordered, or signature-changing
+definitions require a rebuild, as do package, dependency, build, and other
+top-level changes.
+
+Autolith preflights the complete batch, installs it transactionally, runs active
+mutation checks, clean-process replay-probes the resulting private commit, and
+rechecks the exact source snapshot before selection. Failure restores the prior
+live definitions. Each private entry records its baseline and target source
+identity. Startup suppresses an overlay already present in tracked source,
+applies it only over its recorded base, and reports a conflict rather than
+overwriting independently changed source.
+
 * Generations and recovery
 
 =(checkpoint)= requires a clean Git worktree and a passing =./script/check=.

@@ -150,7 +150,8 @@ Only a bounded live region is repainted at the bottom.
 
 * Live mutation and generations
 
-The =self.*= tools can inspect the active image and install a complete definition.
+The =self.*= tools can inspect the active image, install exploratory definitions,
+and apply supported tracked definition edits as source-aware private overlays.
 
 #+BEGIN_SRC text
 journal proposal
@@ -173,6 +174,15 @@ compile and install --> checks --> replay script and manifest
   evidence. =self.discard= reverses one effective change
 - =self.commit= creates a private snapshot, replay-probes it, commits it
   to the separate mutation-history repository, and atomically selects it
+- =self.load-source-changes= validates an explicit changed-source boundary,
+  installs all definitions transactionally, and records Git, blob, pathname,
+  base-definition, and target-definition provenance
+- Source-aware replay preflights the complete selected overlay set, suppresses
+  definitions already present in tracked source, applies definitions only over
+  their recorded bases, and fails closed on divergence
+- Source publication rechecks its exact tracked snapshot immediately before
+  private selection; returning a definition to its tracked base retires its
+  overlay
 - Checkpoints use =sbcl-generations=. Before the fork, Autolith quiesces
   work, clears credentials, detaches workers, and checks provenance
 
