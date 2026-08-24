@@ -640,6 +640,26 @@
              "restart-value" (tool-restart-value-property))
             '("definition")))
           (list
+           'self-load-source-changes-tool
+           "self" "load-source-changes"
+           "Atomically install supported complete definitions changed in explicit tracked src/ Common Lisp files, run active checks, and publish one source-aware private image commit. Git source is read only. Structural, package, dependency, side-effect, addition, deletion, rename, order, and signature changes require a rebuild."
+           (tool-object-schema
+            (json-object
+             "paths" (json-object
+                      "type" "array"
+                      "description"
+                      "Non-empty repository-relative tracked src/ Common Lisp paths forming the complete changed-source boundary."
+                      "minItems" 1
+                      "items" (tool-string-property
+                               "One repository-relative source pathname."))
+             "baseline" (tool-string-property
+                         "Optional Git source baseline; it must match the revision represented by the running image.")
+             "title" (tool-string-property
+                      "A single private image-commit title under 72 characters.")
+             "restart" (tool-restart-property)
+             "restart-value" (tool-restart-value-property))
+            '("paths" "title")))
+          (list
            'self-set-tool
            "self" "set"
            "Set one active global binding to the value of a Common Lisp form."

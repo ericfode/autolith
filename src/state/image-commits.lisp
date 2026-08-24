@@ -303,6 +303,39 @@
        :pathname script-pathname)))
   nil)
 
+(-> image-commit--source-entry-consistent-p (list list) boolean)
+(defun image-commit--source-entry-consistent-p (entry provenance)
+  "Return true when ENTRY's source exactly matches its PROVENANCE."
+  (handler-case
+      (let* ((package-name (or (getf entry :package) "AUTOLITH"))
+             (package (find-package package-name))
+             (definition
+               (and package
+                    (self-read-form (getf entry :source)
+                                    :read-eval nil
+                                    :package package)))
+             (base-definition
+               (and package
+                    (self-read-form (getf provenance :base-source)
+                                    :read-eval nil
+                                    :package package))))
+        (and package
+             (string= package-name (getf provenance :package))
+             (string= (getf entry :target)
+                      (getf provenance :definition-target))
+             (definition-form-p definition)
+             (string= (definition-key definition) (getf entry :target))
+             (string= (source-definition-identity definition)
+                      (getf provenance :target-identity))
+             (definition-form-p base-definition)
+             (string= (definition-key base-definition)
+                      (getf entry :target))
+             (string= (source-definition-identity base-definition)
+                      (getf provenance :base-identity))
+             t))
+    (error ()
+      nil)))
+
 (-> image-commit--entry-p (t) boolean)
 (defun image-commit--entry-p (entry)
   "Return true when ENTRY is one complete portable replay entry."
@@ -313,6 +346,12 @@
        (stringp (getf entry :source))
        (or (null (getf entry :package))
            (non-empty-string-p (getf entry :package)))
+       (let ((provenance (getf entry :source-provenance)))
+         (or (null provenance)
+             (and (eq (getf entry :kind) ':definition)
+                  (source-hotload-provenance-p provenance)
+                  (image-commit--source-entry-consistent-p
+                   entry provenance))))
        t))
 
 (-> image-commit--manifest-form
@@ -512,6 +551,10 @@
        (stringp (getf (rest record) :proposed))
        (or (null (getf (rest record) :package))
            (non-empty-string-p (getf (rest record) :package)))
+       (or (null (getf (rest record) :source-provenance))
+           (and (eq (getf (rest record) :kind) ':definition)
+                (source-hotload-provenance-p
+                 (getf (rest record) :source-provenance))))
        t))
 
 (-> image-commit--discard-record-p (t string) boolean)
@@ -645,11 +688,25 @@
 (defun image-commit--record->entry (record)
   "Convert one installed mutation journal RECORD to a replay entry."
   (let ((properties (rest record)))
-    (list :kind (getf properties :kind)
-          :id (getf properties :id)
-          :target (getf properties :target)
-          :package (or (getf properties :package) "AUTOLITH")
-          :source (getf properties :proposed))))
+    (append
+     (list :kind (getf properties :kind)
+           :id (getf properties :id)
+           :target (getf properties :target)
+           :package (or (getf properties :package) "AUTOLITH")
+           :source (getf properties :proposed))
+     (when (getf properties :source-provenance)
+       (list :source-provenance
+             (copy-tree (getf properties :source-provenance)))))))
+
+(-> image-commit--entry-retires-overlay-p (list) boolean)
+(defun image-commit--entry-retires-overlay-p (entry)
+  "Return true when ENTRY restores its tracked baseline definition."
+  (let ((provenance (getf entry :source-provenance)))
+    (and provenance
+         (getf provenance :base-present-p)
+         (string= (getf provenance :target-identity)
+                  (getf provenance :base-identity))
+         t)))
 
 (-> image-commit--merge-entries (list list) list)
 (defun image-commit--merge-entries (base additions)
@@ -664,7 +721,8 @@
                 (getf addition :kind)
                 (getf addition :target)))
              result))
-      (setf result (nconc result (list addition))))
+      (unless (image-commit--entry-retires-overlay-p addition)
+        (setf result (nconc result (list addition)))))
     result))
 
 (-> image-commit--write-entry (stream list) null)
@@ -675,10 +733,16 @@
           (getf entry :target))
   (case (getf entry :kind)
     (:definition
-     (format stream
-             "(self-replay-definition ~S ~S)~%"
-             (or (getf entry :package) "AUTOLITH")
-             (getf entry :source)))
+     (if (getf entry :source-provenance)
+         (format stream
+                 "(self-replay-source-definition ~S ~S '~S)~%"
+                 (or (getf entry :package) "AUTOLITH")
+                 (getf entry :source)
+                 (getf entry :source-provenance))
+         (format stream
+                 "(self-replay-definition ~S ~S)~%"
+                 (or (getf entry :package) "AUTOLITH")
+                 (getf entry :source))))
     (:set
      (format stream
              "(setf (symbol-value (quote ~A))~%~6T~A)~%"
@@ -745,8 +809,136 @@
   (finish-output *standard-output*)
   nil)
 
-(-> image-commit-replay-probe (configuration pathname string) null)
-(defun image-commit-replay-probe (configuration script identifier)
+(defvar *image-commit-replay-probe-entries* nil
+  "The complete replay entries being clean-process probed during publication.")
+
+(-> image-commit--source-probe-groups (list) list)
+(defun image-commit--source-probe-groups (entries)
+  "Group source-aware replay ENTRIES by repository-relative pathname."
+  (let ((groups nil))
+    (dolist (entry entries)
+      (let ((provenance (getf entry :source-provenance)))
+        (when provenance
+          (let* ((pathname (getf provenance :relative-pathname))
+                 (group (assoc pathname groups :test #'string=)))
+            (if group
+                (setf (rest group) (nconc (rest group) (list entry)))
+                (setf groups (nconc groups (list (list pathname entry)))))))))
+    groups))
+
+(-> image-commit--source-probe-content (pathname list) string)
+(defun image-commit--source-probe-content (pathname entries)
+  "Return PATHNAME with source-aware ENTRIES replaced by recorded base forms."
+  (let* ((package (find-package '#:autolith))
+         (source (uiop:read-file-string pathname))
+         (seen nil)
+         (cursor 0))
+    (prog1
+        (with-output-to-string (stream)
+          (dolist (source-form (source-read-forms source :package package))
+            (let* ((form (source-form-form source-form))
+                   (target (and (definition-form-p form)
+                                (definition-key form)))
+                   (entry (and target
+                               (find target entries
+                                     :key (lambda (candidate)
+                                            (getf candidate :target))
+                                     :test #'string=))))
+              (when entry
+                (let* ((provenance (getf entry :source-provenance))
+                       (actual (source-definition-identity form)))
+                  (unless (string= actual
+                                   (getf provenance :target-identity))
+                    (error 'image-commit-error
+                           :message
+                           (format nil "Clean replay source ~A does not contain target definition ~A."
+                                   pathname target)
+                           :tool-name "self.commit"
+                           :pathname pathname
+                           :stage ':replay-probe))
+                  (write-string source stream
+                                :start cursor
+                                :end (source-form-start source-form))
+                  (when (getf provenance :base-present-p)
+                    (write-string (getf provenance :base-source) stream))
+                  (setf cursor (source-form-end source-form))
+                  (pushnew target seen :test #'string=)))))
+          (write-string source stream :start cursor))
+      (dolist (entry entries)
+        (unless (find (getf entry :target) seen :test #'string=)
+          (error 'image-commit-error
+                 :message
+                 (format nil "Clean replay source ~A is missing target definition ~A."
+                         pathname (getf entry :target))
+                 :tool-name "self.commit"
+                 :pathname pathname
+                 :stage ':replay-probe))))))
+
+(-> image-commit--call-with-source-probe-script
+    (configuration pathname list function)
+    t)
+(defun image-commit--call-with-source-probe-script
+    (configuration script entries function)
+  "Call FUNCTION with a script that replays source overlays against their bases."
+  (let ((groups (image-commit--source-probe-groups entries)))
+    (if (null groups)
+        (funcall function script)
+        (let* ((root
+                 (merge-pathnames
+                  (format nil "image-commit-replay-probe-~A/"
+                          (make-identifier))
+                  (configuration-cache-root configuration)))
+               (wrapper (merge-pathnames "probe-reconstruct.lisp" root)))
+          (unwind-protect
+               (progn
+                 (dolist (group groups)
+                   (let* ((relative-pathname (first group))
+                          (source-pathname
+                            (merge-pathnames
+                             relative-pathname
+                             (configuration-source-root configuration)))
+                          (probe-pathname
+                            (merge-pathnames relative-pathname root)))
+                     (unless (and (uiop:subpathp
+                                   source-pathname
+                                   (merge-pathnames
+                                    "src/"
+                                    (configuration-source-root configuration)))
+                                  (probe-file source-pathname))
+                       (error 'image-commit-error
+                              :message
+                              (format nil "Clean replay source path ~A is unavailable."
+                                      relative-pathname)
+                              :tool-name "self.commit"
+                              :pathname source-pathname
+                              :stage ':replay-probe))
+                     (ensure-directories-exist probe-pathname)
+                     (with-open-file
+                         (stream probe-pathname
+                                 :direction ':output
+                                 :if-exists ':supersede
+                                 :if-does-not-exist ':create
+                                 :external-format ':utf-8)
+                       (write-string
+                        (image-commit--source-probe-content
+                         source-pathname (rest group))
+                        stream))))
+                 (image-commit--write-atomically
+                  wrapper
+                  (lambda (stream)
+                    (format stream "(in-package #:autolith)~2%")
+                    (format stream
+                            "(let ((*source-hotload-replay-root* (pathname ~S)))~%~2T(load (pathname ~S)))~%"
+                            (namestring root)
+                            (namestring script))))
+                 (funcall function wrapper))
+            (when (probe-file root)
+              (uiop:delete-directory-tree root
+                                          :validate t
+                                          :if-does-not-exist ':ignore)))))))
+
+(-> image-commit--run-replay-probe (configuration pathname string) null)
+(defun image-commit--run-replay-probe (configuration script identifier)
   "Require SCRIPT to load successfully in a clean pinned Autolith process."
   (let* ((source-root (configuration-source-root configuration))
          (entry (merge-pathnames "bin/autolith-active" source-root))
@@ -754,34 +946,51 @@
          (sbcl-command (if (non-empty-string-p configured-command)
                            configured-command
                            "sbcl"))
-         (expected (image-commit-replay-probe-output identifier))
-         (output
-           (handler-case
-               (uiop:run-program
-                (list sbcl-command
-                      "--noinform"
-                      "--script"
-                      (namestring entry)
-                      *image-commit-replay-probe-argument*
-                      (namestring script)
-                      identifier)
-                :input nil
-                :output ':string
-                :error-output ':output)
-             (error (condition)
-               (error 'image-commit-error
-                      :message
-                      (format nil "The clean private replay probe failed: ~A"
-                              condition)
-                      :tool-name "self.commit"
-                      :pathname script
-                      :stage ':replay-probe)))))
-    (unless (search expected output :test #'char=)
-      (error 'image-commit-error
-             :message "The clean private replay probe returned no success marker."
-             :tool-name "self.commit"
-             :pathname script
-             :stage ':replay-probe)))
+         (expected (image-commit-replay-probe-output identifier)))
+    (multiple-value-bind (output error-output exit-code)
+        (handler-case
+            (uiop:run-program
+             (list sbcl-command
+                   "--noinform"
+                   "--script"
+                   (namestring entry)
+                   *image-commit-replay-probe-argument*
+                   (namestring script)
+                   identifier)
+             :input nil
+             :output ':string
+             :error-output ':output
+             :ignore-error-status t)
+          (error (condition)
+            (error 'image-commit-error
+                   :message
+                   (format nil "The clean private replay probe failed: ~A"
+                           condition)
+                   :tool-name "self.commit"
+                   :pathname script
+                   :stage ':replay-probe)))
+      (declare (ignore error-output))
+      (unless (and (zerop exit-code)
+                   (search expected output :test #'char=))
+        (error 'image-commit-error
+               :message
+               (format nil "The clean private replay probe failed with status ~D or returned no success marker:~%~A"
+                       exit-code
+                       (bounded-string output :limit 4000))
+               :tool-name "self.commit"
+               :pathname script
+               :stage ':replay-probe))))
+  nil)
+
+(-> image-commit-replay-probe (configuration pathname string) null)
+(defun image-commit-replay-probe (configuration script identifier)
+  "Probe source-aware overlays against their bases in a clean source process."
+  (image-commit--call-with-source-probe-script
+   configuration
+   script
+   *image-commit-replay-probe-entries*
+   (lambda (probe-script)
+     (image-commit--run-replay-probe configuration probe-script identifier)))
   nil)
 
 (defvar *image-commit-replay-probe-function* #'image-commit-replay-probe
@@ -805,10 +1014,12 @@
      &key (:title string)
           (:mutation-records list)
           (:additional-entries list)
-          (:identifier (option string)))
+          (:identifier (option string))
+          (:selection-check (option function)))
     image-commit)
 (defun image-commit-publish
-    (configuration &key title mutation-records additional-entries identifier)
+    (configuration
+     &key title mutation-records additional-entries identifier selection-check)
   "Publish one immutable private commit from mutations and explicit entries."
   (let* ((identifier (or identifier (make-identifier)))
          (parent (image-commit-current configuration))
@@ -859,10 +1070,13 @@
             (remove-duplicates mutation-identifiers :test #'string=)
             :journal-position journal-position
             :created-at created-at))
-          (funcall *image-commit-replay-probe-function*
-                   configuration
-                   script-pathname
-                   identifier)
+          (let ((*image-commit-replay-probe-entries* entries))
+            (funcall *image-commit-replay-probe-function*
+                     configuration
+                     script-pathname
+                     identifier))
+          (when selection-check
+            (funcall selection-check))
           (let* ((history-commit
                    (image-history-commit
                     configuration
@@ -873,6 +1087,8 @@
                  (commit
                    (image-commit-load configuration identifier
                                       :history-commit history-commit)))
+            (when selection-check
+              (funcall selection-check))
             (image-commit--write-form-atomically
              (configuration-current-image-commit-path configuration)
              (list :current-image-commit
@@ -886,6 +1102,12 @@
               (remhash (getf (rest mutation-record) :id)
                        *exploratory-undo-actions*))
             commit))
+      (source-hotload-error (condition)
+        (when (probe-file directory)
+          (uiop:delete-directory-tree directory
+                                      :validate t
+                                      :if-does-not-exist ':ignore))
+        (error condition))
       (image-commit-error (condition)
         (when (probe-file directory)
           (uiop:delete-directory-tree directory
@@ -917,6 +1139,24 @@
                  :test #'string=)
          t)))
 
+(-> image-commit--preflight-source-entries (image-commit) hash-table)
+(defun image-commit--preflight-source-entries (commit)
+  "Return cached decisions after validating every source overlay in COMMIT."
+  (let ((results (make-hash-table :test #'equal)))
+    (dolist (entry (image-commit-entries commit))
+      (let ((provenance (getf entry :source-provenance)))
+        (when provenance
+          (let ((package-name (or (getf entry :package) "AUTOLITH"))
+                (source (getf entry :source)))
+            (setf (gethash
+                   (source-hotload--preflight-key
+                    package-name source provenance)
+                   results)
+                  (multiple-value-list
+                   (source-hotload-preflight-source-definition
+                    package-name source provenance)))))))
+    results))
+
 (-> image-state-load (configuration) list)
 (defun image-state-load (configuration)
   "Load normal startup mutation state and begin a fresh journal lineage."
@@ -934,8 +1174,12 @@
                         :history-commit history-commit))
                (pathname (image-commit-script-pathname commit)))
           (handler-case
-              (let ((*package* (find-package '#:autolith)))
-                (load pathname))
+              (let ((*package* (find-package '#:autolith))
+                    (*source-hotload-replay-root*
+                      (configuration-source-root configuration)))
+                (let ((*source-hotload-preflight-results*
+                        (image-commit--preflight-source-entries commit)))
+                  (load pathname)))
             (error (condition)
               (push (cons pathname (format nil "~A" condition)) failures)))))
       (nreverse failures))))

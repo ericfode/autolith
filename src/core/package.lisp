@@ -310,6 +310,8 @@
                 #:source-grammar
                 #:validate-tree)
   (:import-from #:ironclad
+                #:byte-array-to-hex-string
+                #:digest-sequence
                 #:make-mac
                 #:produce-mac
                 #:random-data

@@ -350,9 +350,11 @@ protocol."
 (-> definition-key (list) string)
 (defun definition-key (definition)
   "Return a stable readable key for DEFINITION's semantic signature."
-  (write-to-string (definition-signature definition)
-                   :readably t
-                   :case :downcase))
+  (let ((*package* (find-package '#:autolith))
+        (*print-pretty* nil))
+    (write-to-string (definition-signature definition)
+                     :readably t
+                     :case :downcase)))
 
 (-> self-previous-definition (configuration list) (option string))
 (defun self-previous-definition (configuration definition)
@@ -652,58 +654,66 @@ protocol."
              :original-condition original-condition
              :restoration-condition restoration-condition))))
 
-(-> self-install-definition
-    (configuration string &key (:package package))
-    t)
-(defun self-install-definition
-    (configuration source &key (package (find-package '#:autolith)))
-  "Compile and install one exploratory SOURCE definition in PACKAGE."
+(-> self--install-definition-journaled
+    (configuration string
+     &key (:package package)
+          (:read-eval boolean)
+          (:previous-source (option string))
+          (:provenance (option list)))
+    (values t string list))
+(defun self--install-definition-journaled
+    (configuration source
+     &key
+       (package (find-package '#:autolith))
+       (read-eval t)
+       (previous-source nil previous-source-supplied-p)
+       provenance)
+  "Install and journal SOURCE, returning its value, identifier, and record."
   (with-live-mutation
-    (let ((definition (self-read-form source :package package))
+    (let ((definition (self-read-form source
+                                      :read-eval read-eval
+                                      :package package))
           (package-name (package-name package)))
       (unless (definition-form-p definition)
         (error 'source-mutation-error
                :message "self.redefine accepts one complete supported definition."
                :tool-name "self.redefine"
                :pathname nil))
-      (let ((identifier (make-identifier))
-            (key (definition-key definition))
-            (previous (self-previous-definition configuration definition))
-            (undo-action nil))
-        (setf undo-action
-              (self--definition-state-undo-action
-               definition
-               previous
-               package))
+      (let* ((identifier (make-identifier))
+             (key (definition-key definition))
+             (previous
+               (if previous-source-supplied-p
+                   previous-source
+                   (self-previous-definition configuration definition)))
+             (undo-action
+               (self--definition-state-undo-action definition previous package))
+             (properties
+               (append
+                (list :kind ':definition
+                      :id identifier
+                      :lineage *active-image-lineage-identifier*
+                      :target key
+                      :package package-name
+                      :previous previous
+                      :proposed source)
+                (when provenance
+                  (list :source-provenance provenance)))))
         (mutation-journal-append
          configuration
-         (list :mutation
-               :kind :definition
-               :id identifier
-               :lineage *active-image-lineage-identifier*
-               :target key
-               :package package-name
-               :previous previous
-               :proposed source
-               :result ':pending))
+         (list* :mutation (append properties (list :result ':pending))))
         (handler-case
-            (let ((result (self--install-definition definition
-                                                    source
-                                                    :package package)))
-              (mutation-journal-append
-               configuration
-               (list :mutation
-                     :kind :definition
-                     :id identifier
-                     :lineage *active-image-lineage-identifier*
-                     :target key
-                     :package package-name
-                     :previous previous
-                     :proposed source
-                     :result ':installed))
+            (let* ((result (self--install-definition definition
+                                                     source
+                                                     :package package))
+                   (record
+                     (mutation-journal-append
+                      configuration
+                      (list* :mutation
+                             (append properties
+                                     (list :result ':installed))))))
               (setf (gethash identifier *exploratory-undo-actions*)
                     undo-action)
-              result)
+              (values result identifier record))
           (error (condition)
             (let ((reported-condition condition))
               (handler-case
@@ -714,17 +724,21 @@ protocol."
                   (setf reported-condition corruption)))
               (mutation-journal-append
                configuration
-               (list :mutation
-                     :kind :definition
-                     :id identifier
-                     :lineage *active-image-lineage-identifier*
-                     :target key
-                     :package package-name
-                     :previous previous
-                     :proposed source
-                     :result ':failed
-                     :condition (princ-to-string reported-condition)))
+               (list* :mutation
+                      (append properties
+                              (list :result ':failed
+                                    :condition
+                                    (princ-to-string reported-condition)))))
               (error reported-condition))))))))
+
+(-> self-install-definition
+    (configuration string &key (:package package))
+    t)
+(defun self-install-definition
+    (configuration source &key (package (find-package '#:autolith)))
+  "Compile and install one exploratory SOURCE definition in PACKAGE."
+  (values
+   (self--install-definition-journaled configuration source :package package)))
 
 (defmethod tool-execute ((tool self-redefine-tool)
                          (context tool-context)
@@ -916,6 +930,256 @@ protocol."
         (push (make-instance 'source-form :form form :start start :end end)
               forms)
         (setf position end)))))
+
+
+;;;; -- Source-Backed Replay --
+
+(defvar *source-hotload-replay-root* nil
+  "The explicit source root used by isolated source-overlay replay tests.")
+
+(defvar *source-hotload-preflight-results* nil
+  "The complete cached source-overlay decisions for one startup replay.")
+
+(-> source-definition-identity (t) non-empty-string)
+(defun source-definition-identity (definition)
+  "Return a stable SHA-256 identity for one parsed source DEFINITION."
+  (let* ((*package* (find-package '#:autolith))
+         (*print-array* t)
+         (*print-base* 10)
+         (*print-case* ':downcase)
+         (*print-circle* t)
+         (*print-gensym* t)
+         (*print-length* nil)
+         (*print-level* nil)
+         (*print-pretty* nil)
+         (*print-radix* nil)
+         (*print-readably* t)
+         (source (write-to-string definition))
+         (octets (sb-ext:string-to-octets source :external-format ':utf-8)))
+    (byte-array-to-hex-string (digest-sequence ':sha256 octets))))
+
+(-> source-definition-shape (list) list)
+(defun source-definition-shape (definition)
+  "Return DEFINITION's reload-compatible structural and callable signature."
+  (case (first definition)
+    ((defun defgeneric defmacro deftype define-compiler-macro
+      define-context-contributor)
+     (list (definition-signature definition) (third definition)))
+    (define-application-command
+     (list (definition-signature definition)
+           (fourth definition)
+           (getf (second (rest definition)) :call-lambda-list)))
+    (defmethod
+     (let* ((tail (rest (rest definition)))
+            (lambda-position (position-if #'listp tail)))
+       (list (definition-signature definition)
+             (nth lambda-position tail))))
+    ((defclass defstruct define-condition)
+     definition)
+    (otherwise
+     (definition-signature definition))))
+
+(-> source-hotload-provenance-p (t) boolean)
+(defun source-hotload-provenance-p (provenance)
+  "Return true when PROVENANCE completely identifies one source overlay."
+  (and (listp provenance)
+       (= (or (getf provenance :version) 0) 1)
+       (non-empty-string-p (getf provenance :repository-commit))
+       (non-empty-string-p (getf provenance :baseline-commit))
+       (non-empty-string-p (getf provenance :relative-pathname))
+       (non-empty-string-p (getf provenance :package))
+       (member (getf provenance :source-state)
+               '(:committed :uncommitted)
+               :test #'eq)
+       (eq (getf provenance :base-present-p) t)
+       (stringp (getf provenance :base-source))
+       (non-empty-string-p (getf provenance :base-identity))
+       (non-empty-string-p (getf provenance :base-file-blob))
+       (non-empty-string-p (getf provenance :target-file-blob))
+       (non-empty-string-p (getf provenance :definition-target))
+       (non-empty-string-p (getf provenance :target-identity))
+       t))
+
+(-> source-hotload--replay-root () pathname)
+(defun source-hotload--replay-root ()
+  "Return the tracked source root consulted by private overlay replay."
+  (uiop:ensure-directory-pathname
+   (or *source-hotload-replay-root*
+       (asdf:system-source-directory '#:autolith))))
+
+(-> source-hotload--replay-pathname (list) pathname)
+(defun source-hotload--replay-pathname (provenance)
+  "Resolve PROVENANCE's existing tracked source pathname without escaping src/."
+  (let* ((root (source-hotload--replay-root))
+         (editable-root (merge-pathnames "src/" root))
+         (relative-pathname (getf provenance :relative-pathname))
+         (pathname (merge-pathnames relative-pathname root)))
+    (unless (and (uiop:subpathp pathname editable-root)
+                 (probe-file pathname))
+      (error 'source-overlay-conflict
+             :message
+             (format nil
+                     "Tracked source path ~A is unavailable; the private overlay was not applied. Rebuild Autolith or resolve the source path before replay."
+                     relative-pathname)
+             :tool-name "self.load-source-changes"
+             :pathname pathname
+             :stage ':replay
+             :reason ':source-path-diverged
+             :relative-pathname relative-pathname
+             :target (getf provenance :definition-target)
+             :base-identity (getf provenance :base-identity)
+             :target-identity (getf provenance :target-identity)
+             :actual-identity nil))
+    pathname))
+
+(-> source-hotload--tracked-definition
+    (pathname string package)
+    (values (option list) (option string)))
+(defun source-hotload--tracked-definition (pathname target package)
+  "Return PATHNAME's unique definition matching TARGET and its exact source."
+  (let* ((source (uiop:read-file-string pathname))
+         (matches
+           (loop for source-form in (source-read-forms source :package package)
+                 for form = (source-form-form source-form)
+                 when (and (definition-form-p form)
+                           (string= (definition-key form) target))
+                   collect source-form)))
+    (when (> (length matches) 1)
+      (error 'source-overlay-conflict
+             :message
+             (format nil
+                     "Tracked source contains multiple definitions for ~A; the private overlay was not applied."
+                     target)
+             :tool-name "self.load-source-changes"
+             :pathname pathname
+             :stage ':replay
+             :reason ':duplicate-definition
+             :relative-pathname nil
+             :target target
+             :base-identity nil
+             :target-identity "unknown"
+             :actual-identity nil))
+    (let ((match (first matches)))
+      (values (and match (source-form-form match))
+              (and match
+                   (subseq source
+                           (source-form-start match)
+                           (source-form-end match)))))))
+
+(-> source-hotload--preflight-key (string string list) list)
+(defun source-hotload--preflight-key (package-name source provenance)
+  "Return the exact key for one cached source-overlay replay decision."
+  (list package-name source provenance))
+
+(-> source-hotload-preflight-source-definition
+    (string string list)
+    (values keyword package list))
+(defun source-hotload-preflight-source-definition
+    (package-name source provenance)
+  "Validate one source overlay and return its replay state and definition."
+  (unless (source-hotload-provenance-p provenance)
+    (error 'source-mutation-error
+           :message "A private image commit contains invalid source provenance."
+           :tool-name "self.commit"
+           :pathname nil))
+  (let* ((package (self-resolve-package package-name))
+         (definition (self-read-form source :read-eval nil :package package))
+         (base-definition
+           (self-read-form (getf provenance :base-source)
+                           :read-eval nil
+                           :package package))
+         (target (getf provenance :definition-target))
+         (target-identity (getf provenance :target-identity))
+         (pathname (source-hotload--replay-pathname provenance)))
+    (unless (and (definition-form-p definition)
+                 (string= (definition-key definition) target)
+                 (string= (source-definition-identity definition)
+                          target-identity))
+      (error 'source-mutation-error
+             :message
+             (format nil
+                     "A private image commit target definition does not match its provenance: expected ~A for ~A, got ~A for ~A."
+                     target-identity
+                     target
+                     (source-definition-identity definition)
+                     (and (definition-form-p definition)
+                          (definition-key definition)))
+             :tool-name "self.commit"
+             :pathname pathname))
+    (unless (and (definition-form-p base-definition)
+                 (string= (definition-key base-definition) target)
+                 (string= (source-definition-identity base-definition)
+                          (getf provenance :base-identity)))
+      (error 'source-mutation-error
+             :message
+             "A private image commit base definition does not match its provenance."
+             :tool-name "self.commit"
+             :pathname pathname))
+    (multiple-value-bind (tracked-definition tracked-source)
+        (source-hotload--tracked-definition pathname target package)
+      (declare (ignore tracked-source))
+      (let ((actual-identity
+              (and tracked-definition
+                   (source-definition-identity tracked-definition))))
+        (cond
+          ((and actual-identity (string= actual-identity target-identity))
+           (values ':suppressed package definition))
+          ((and actual-identity
+                (string= actual-identity
+                         (getf provenance :base-identity)))
+           (values ':replay package definition))
+          (t
+           (error 'source-overlay-conflict
+                  :message
+                  (format nil
+                          "Tracked definition ~A in ~A diverged from both the recorded base and overlay; replay failed closed without overriding it."
+                          target
+                          (getf provenance :relative-pathname))
+                  :tool-name "self.load-source-changes"
+                  :pathname pathname
+                  :stage ':replay
+                  :reason ':definition-diverged
+                  :relative-pathname
+                  (getf provenance :relative-pathname)
+                  :target target
+                  :base-identity (getf provenance :base-identity)
+                  :target-identity target-identity
+                  :actual-identity actual-identity)))))))
+
+(-> self-replay-source-definition (string string list) keyword)
+(defun self-replay-source-definition (package-name source provenance)
+  "Replay SOURCE using one complete startup preflight snapshot when bound."
+  (handler-case
+      (let ((result
+              (if (hash-table-p *source-hotload-preflight-results*)
+                  (multiple-value-bind (cached present-p)
+                      (gethash
+                       (source-hotload--preflight-key
+                        package-name source provenance)
+                       *source-hotload-preflight-results*)
+                    (unless present-p
+                      (error 'source-mutation-error
+                             :message
+                             "A preflighted private image script contains an unexpected source overlay."
+                             :tool-name "self.commit"
+                             :pathname nil))
+                    cached)
+                  (multiple-value-list
+                   (source-hotload-preflight-source-definition
+                    package-name source provenance)))))
+        (destructuring-bind (state package definition) result
+          (case state
+            (:suppressed
+             ':suppressed)
+            (:replay
+             (self--install-definition definition source :package package)
+             ':replayed))))
+    (source-overlay-conflict (condition)
+      (restart-case
+          (error condition)
+        (skip-source-overlay ()
+          :report "Keep the divergent tracked definition and skip this overlay."
+          ':skipped)))))
 
 (-> self-source--definitions
     (list &key (:root pathname)

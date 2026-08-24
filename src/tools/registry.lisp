@@ -111,6 +111,11 @@
   ()
   (:documentation "Compile and install one exploratory top-level definition."))
 
+(defclass self-load-source-changes-tool (mutable-self-tool)
+  ()
+  (:documentation
+   "Atomically install and privately commit supported tracked source changes."))
+
 (defclass self-set-tool (mutable-self-tool)
   ()
   (:documentation "Set one active global binding to an evaluated value."))

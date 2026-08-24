@@ -565,6 +565,52 @@
     :documentation "The source file involved in the failed mutation."))
   (:documentation "An active-image or durable source mutation failed."))
 
+(define-condition source-hotload-error (source-mutation-error)
+  ((stage
+    :initarg :stage
+    :reader source-hotload-error-stage
+    :type keyword
+    :documentation "The source-backed hot-load stage that failed.")
+   (reason
+    :initarg :reason
+    :reader source-hotload-error-reason
+    :type keyword
+    :documentation "The machine-readable reason a rebuild is required.")
+   (relative-pathname
+    :initarg :relative-pathname
+    :initform nil
+    :reader source-hotload-error-relative-pathname
+    :type (option string)
+    :documentation "The repository-relative source path involved, when known."))
+  (:documentation
+   "Tracked source cannot be applied safely to the running active image."))
+
+(define-condition source-overlay-conflict (source-hotload-error)
+  ((target
+    :initarg :target
+    :reader source-overlay-conflict-target
+    :type non-empty-string
+    :documentation "The semantic definition target protected from replay.")
+   (base-identity
+    :initarg :base-identity
+    :initform nil
+    :reader source-overlay-conflict-base-identity
+    :type (option string)
+    :documentation "The expected base definition identity, when one existed.")
+   (target-identity
+    :initarg :target-identity
+    :reader source-overlay-conflict-target-identity
+    :type non-empty-string
+    :documentation "The exact overlay definition identity.")
+   (actual-identity
+    :initarg :actual-identity
+    :initform nil
+    :reader source-overlay-conflict-actual-identity
+    :type (option string)
+    :documentation "The independently changed tracked definition identity."))
+  (:documentation
+   "Private replay found tracked source that matches neither its base nor target."))
+
 (define-condition image-commit-error (source-mutation-error)
   ((stage
     :initarg :stage
